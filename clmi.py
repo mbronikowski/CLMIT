@@ -3,16 +3,22 @@ import queue
 import cv2
 import warnings
 
+from astropy.wcs import WCS
 from astropy.cosmology import FlatLambdaCDM
 from astropy.io import fits
 
 _cosmo = FlatLambdaCDM(H0=70, Om0=0.3)
-_C = 299792458  # speed of light, SI units
-_dilation_erosion_steps = 1
+_C = 299792458  # speed of light, SI units      # TODO: astropy units handling etc?
+_dilation_erosion_steps = 1                     # TODO: fine tune this
 
 
 def set_cosmology(new_cosmology):
-    """Set astropy cosmology model for calculations in place of the default flat Lambda CDM with H0=70, OmegaM = 0.3."""
+    """Set astropy cosmology model for calculations in place of the default flat Lambda CDM with H0=70, OmegaM = 0.3.
+
+    Note that this needs to be performed before initiating a ClusterModel instance, otherwise a new working z
+    needs to be set in the instance to reset cosmology-dependent calculations.
+    """
+
     global _cosmo
     _cosmo = new_cosmology
 
@@ -23,19 +29,22 @@ def distance_scale_factor(z_lens, z_source):
     The ratio is used to scale deflection and magnification maps. 
     Uses module level defined cosmology, which can be redefined using set_cosmology.
     """
-    Dds = _cosmo.angular_diameter_distance_z1z2(z_lens, z_source)
-    Ds = _cosmo.angular_diameter_distance_z1z2(0, z_source)
-    return Dds / Ds
+
+    dist_deflector_source = _cosmo.angular_diameter_distance_z1z2(z_lens, z_source)     # commonly referred to as Dds.
+    dist_source = _cosmo.angular_diameter_distance_z1z2(0, z_source)                    # Commonly referred to as Ds.
+    return dist_deflector_source / dist_source
 
 
 def distance_parameter(z_lens, z_source):
     """Used in time delay equation, see https://arxiv.org/pdf/astro-ph/9606001.pdf Eq. 63.
 
-    Uses module level defined cosmology, which can be redefined using set_cosmology."""
-    Dds = _cosmo.angular_diameter_distance_z1z2(z_lens, z_source)
-    Ds = _cosmo.angular_diameter_distance_z1z2(0, z_source)
-    Dd = _cosmo.angular_diameter_distance_z1z2(0, z_lens)
-    return (Dd * Ds / Dds).value
+    Uses module level defined cosmology, which can be redefined using set_cosmology.
+    """
+
+    dist_deflector_source = _cosmo.angular_diameter_distance_z1z2(z_lens, z_source)
+    dist_source = _cosmo.angular_diameter_distance_z1z2(0, z_source)
+    dist_deflector = _cosmo.angular_diameter_distance_z1z2(0, z_lens)
+    return (dist_deflector * dist_source / dist_deflector_source).value
 
 
 def magnification(kappa, gamma, scaling_factor):  # Works for both individual numbers and np arrays.
@@ -44,7 +53,7 @@ def magnification(kappa, gamma, scaling_factor):  # Works for both individual nu
 
 
 def time_delay(z_lens, dist_param, alpha, psi):             # TODO: fix this, what are the units???
-    """Calculates the time delay.
+    """Calculates the time delay caused by the gravitational potential: Shapiro time delay plus geometric time delay.
 
     Results are in [unknown units], as long as angles are in [unknown units].
     dist_param is D_lens * D_source / D_(lens to source), NOT Dds_Ds
@@ -98,23 +107,19 @@ def _flood_fill(array, start_pixel, targeted_val, new_val, directions=4):
     return new_arr
 
 
-def _check_and_load_file(initial_input):
-    if initial_input is None:
-        return None, None
-    if isinstance(initial_input, str):
-        initial_input = fits.open(initial_input)
-    return initial_input, initial_input[0].data
-
-
 class ClusterModel:
     """Handle individual cluster models and calculations based on them."""
     def __init__(self, cluster_z, working_z=9, kappa_file=None, gamma_file=None,
-                 psi_file=None, x_deflect_file=None, y_deflect_file=None):
-        self.kappa_file, self.kappa_map = _check_and_load_file(kappa_file)
-        self.gamma_file, self.gamma_map = _check_and_load_file(gamma_file)
-        self.psi_file, self.psi_map = _check_and_load_file(psi_file)
-        self.x_deflect_file, self.x_deflect_map = _check_and_load_file(x_deflect_file)
-        self.y_deflect_file, self.y_deflect_map = _check_and_load_file(y_deflect_file)
+                 psi_file=None, x_pixel_deflect_file=None, y_pixel_deflect_file=None,
+                 x_as_deflect_file=None, y_as_deflect_file=None, wcs=None):
+        self.wcs = wcs
+        self.kappa_map = self._check_and_load_data(kappa_file)
+        self.gamma_map = self._check_and_load_data(gamma_file)
+        self.psi_map = self._check_and_load_data(psi_file)
+        self.x_pixel_deflect_map = self._check_and_load_data(x_pixel_deflect_file)
+        self.y_pixel_deflect_map = self._check_and_load_data(y_pixel_deflect_file)
+        self.x_as_deflect_map = self._check_and_load_data(x_as_deflect_file)
+        self.y_as_deflect_map = self._check_and_load_data(y_as_deflect_file)
 
         self.cluster_z = cluster_z
         self.working_z = working_z
@@ -123,8 +128,27 @@ class ClusterModel:
         self.magnification_map = None
         self.critical_area_map = None
         self.caustic_area_map = None        # This map has the same angular scale as lens plane maps.
-        # TODO: add WCS loaded from one of the files. Can it always be loaded? Can WCS from one fits be used for others?
-        # TODO: add checking deflection map units (arcsec, pixel etc) and conversion handling (can you use astropy?) 
+        # TODO: add checking deflection map units (arcsec, pixel etc) and conversion handling (can you use astropy?)
+        if self.wcs is None:
+            warnings.warn("The cluster model was unable to load a working World Coordinate System from provided files.")
+
+    def _check_and_load_data(self, initial_input):
+        def add_wcs(fits_header):
+            # Load WCS from FITS if the object doesn't have one yet:
+            if self.wcs is None and "CRVAL1" in fits_header.keys():  # This is a bad (?) way to check
+                self.wcs = WCS(fits_header)                          # if a working WCS can be generated.
+
+        if initial_input is None:       # If no file provided, keep None.
+            return None
+        elif isinstance(initial_input, str):          # If filename str is provided, open file, load data, close file.
+            with fits.open(initial_input) as fits_file:
+                data_table = fits_file[0].data.copy()
+                add_wcs(fits_file[0].header)
+            return data_table
+        # Otherwise, assume a fits file was provided. Copy data from it in case it's closed while the object is in use.
+        add_wcs(initial_input[0].header)
+        return initial_input[0].data.copy()   # TODO: [0], ['SCI'] or something else? How to guarantee loading?
+        # TODO: passing np tables with data?
 
     def set_working_z(self, new_z):
         self.working_z = new_z
@@ -166,8 +190,8 @@ class ClusterModel:
         for y in range(critical_map.shape[0]):
             for x in range(critical_map.shape[1]):
                 if critical_map[y, x] > 0:
-                    y_hit = int(y + self.y_deflect_map[y, x] * self.distance_ratio)     # This assumes deflect maps
-                    x_hit = int(x + self.x_deflect_map[y, x] * self.distance_ratio)     # are given in pixels.
+                    y_hit = int(y + self.y_pixel_deflect_map[y, x] * self.distance_ratio)     # This assumes deflect maps
+                    x_hit = int(x + self.x_pixel_deflect_map[y, x] * self.distance_ratio)     # are given in pixels.
                     if 0 <= y_hit < hit_map.shape[0] and 0 <= x_hit < hit_map.shape[1]:
                         hit_map[y_hit, x_hit] = 1
                     elif not mapping_warning_issued:
