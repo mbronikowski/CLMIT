@@ -78,8 +78,26 @@ def _flood_fill(array, start_pixel, targeted_val, new_val):
 
 # noinspection SpellCheckingInspection
 class ClusterModel:
-    """Handle individual cluster models and calculations based on them."""
-    def __init__(self, cluster_z, source_z=9, kappa_file=None, gamma_file=None,
+    """Handles individual cluster models and calculations based on them.
+
+    Keyword arguments:
+    cluster_z -- redshift of the cluster (default 1.0)
+    source_z -- redshift of the source plane for which calculations are made (default 9.0)
+    kappa_file -- cluster lensing convergence map, either a FITS file or path to a FITS file (default None)
+    gamma_file -- cluster lensing total shear map, either a FITS file or path to a FITS file (default None)
+    psi_file -- cluster lensing potential map, either a FITS file or path to a FITS file (default None)
+    x_pixel_deflect_file -- cluster lensing x axis deflection map measured in pixels,
+        either a FITS file or path to a FITS file (default None)
+    y_pixel_deflect_file -- cluster lensing y axis deflection map measured in pixels,
+        either a FITS file or path to a FITS file (default None)
+    x_as_deflect_file -- cluster lensing x axis deflection map measured in arcseconds,
+        either a FITS file or path to a FITS file (default None)
+    y_as_deflect_file -- cluster lensing y axis deflection map measured in arcseconds,
+        either a FITS file or path to a FITS file (default None)
+    map_wcs -- astropy World Coordinate System object to be used by the class.
+        If not provided, the object will attempt to load one from provided maps (default None)
+    """
+    def __init__(self, cluster_z=1., source_z=9., kappa_file=None, gamma_file=None,
                  psi_file=None, x_pixel_deflect_file=None, y_pixel_deflect_file=None,
                  x_as_deflect_file=None, y_as_deflect_file=None, map_wcs=None):
         self.wcs = map_wcs
@@ -97,6 +115,7 @@ class ClusterModel:
         self.source_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.source_z)
         self.distance_ratio = lensing_scaling_factor(self.cluster_z, self.source_z)
         self.distance_param = distance_parameter(self.cluster_z, self.source_z)
+
         self._magnification_map = None       # Private. Access through get_[type]_map.
         self._critical_area_map = None
         self._caustic_area_map = None        # This map has the same angular scale as lens plane maps.
@@ -141,8 +160,8 @@ class ClusterModel:
 
     def _generate_pixel_deflect_maps(self):
         pixel_scale = self.wcs.proj_plane_pixel_scales()[0].to(units.arcsec).value
-        self.x_pixel_deflect_map = self.x_as_deflect_map / pixel_scale
-        self.y_pixel_deflect_map = self.y_as_deflect_map / pixel_scale
+        self.x_pixel_deflect_map = self.x_as_deflect_map.copy() / pixel_scale
+        self.y_pixel_deflect_map = self.y_as_deflect_map.copy() / pixel_scale
 
     def get_magnification_map(self):
         if self._magnification_map is None:
@@ -153,6 +172,7 @@ class ClusterModel:
         self._magnification_map = magnification(self.kappa_map, self.gamma_map, self.distance_ratio)
 
     def get_critical_area_map(self):
+        """Public method to access the map of the cluster's region inside the critical curve, with 1s inside it.."""
         if self._critical_area_map is None:
             self._generate_critical_area_map()
         return self._critical_area_map
@@ -165,6 +185,7 @@ class ClusterModel:
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
     def get_caustic_area_map(self):
+        """Public method to access the map of the region inside the caustic curve, denoted by 1s."""
         if self._caustic_area_map is None:
             self._caustic_area_map = self.map_to_source_plane(self.get_critical_area_map())
         return self._caustic_area_map
@@ -174,14 +195,13 @@ class ClusterModel:
 
         The input needs to be a numpy array of integers with 1s for pixels which are to be mapped, 0s otherwise.
         The function will fill in any holes in the mapped source plane area; the function does not handle areas with
-        holes in them.
+        holes in them in the source plane. This aids with numerical issues inside the caustic curve.
         """
-
-        if self.x_as_deflect_map is None or self.y_as_deflect_map is None:
+        if self.x_pixel_deflect_map is None or self.y_pixel_deflect_map is None:
             self._generate_pixel_deflect_maps()
         if lens_plane_map.shape != self.x_pixel_deflect_map.shape:
             raise ValueError("The array to be mapped back to the source plane needs to have the same shape \
-                as deflection maps.")
+                as deflection maps.")       # TODO: extend the map, make it wider
         hit_map = np.zeros(lens_plane_map.shape)
         mapping_warning_issued = False
         for y in range(lens_plane_map.shape[0]):
@@ -192,26 +212,29 @@ class ClusterModel:
                     if 0 <= y_hit < hit_map.shape[0] and 0 <= x_hit < hit_map.shape[1]:
                         hit_map[y_hit, x_hit] = 1
                     elif not mapping_warning_issued:
-                        warnings.warn("Some of the area passed to this function is mapped \
-                                      outside the generated source plane map. This WILL affect area calculations.")
+                        warnings.warn("Some of the area passed to this function is mapped outside the generated " +
+                                      "source plane map. This WILL affect area calculations.")
                         mapping_warning_issued = True
         # Now we have a raw map from the critical to caustic curve. We need to make sure flood fill doesn't fill gaps
         # between individual hits.
         hit_map = cv2.dilate(hit_map, None, iterations=_dilation_erosion_steps)
         hit_map = cv2.erode(hit_map, None, iterations=_dilation_erosion_steps)
         # Now hopefully all of the gaps between hits were filled and we can flood fill:
+        # TODO: add check to avoid hitting a 1 at (0, 0). Possibly "run" along the edge of the map to find a 0 value?
         hit_map = _flood_fill(hit_map, (0, 0), 0, -1)       # -1 is the outer area outside the caustic curve.
         source_plane_map = np.zeros(hit_map.shape)     # 0 and 1 are inside.
         source_plane_map[np.where(hit_map >= 0)] = 1   # The final map has 1 inside, 0 outside the caustic.
         return source_plane_map.astype(int)
 
-    def corresponding_plane_area(self, pixel_map, plane_redshift):
-        """Calculate the area marked in pixel_map at given redshift.
-
-        pixel_map needs to contain integer 1s where counting is required."""
+    def corresponding_plane_area(self, pixel_map, plane_redshift=None):
+        """Calculate the area marked by integer 1s in pixel_map at given redshift, returns an astropy Quantity."""
+        if plane_redshift is None:
+            plane_redshift = self.source_z
         dist_source = _cosmology.angular_diameter_distance_z1z2(0, plane_redshift)
         pixel_area = dist_source ** 2 * self.wcs.proj_plane_pixel_area().to(units.rad ** 2) / units.rad ** 2
         values, counts = np.unique(pixel_map, return_counts=True)
         values_counts = dict(zip(values, counts))
         return pixel_area * values_counts[1]
 
+    def caustic_area(self):
+        return self.corresponding_plane_area(self.get_caustic_area_map(), self.source_z)
