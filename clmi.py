@@ -316,8 +316,8 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
     object_input = {
         "cluster_z": cluster_z,
         "source_z": source_z,
-        "x_arcsec_deflect_file": None,
-        "y_arcsec_deflect_file": None,
+        "x_as_deflect_file": None,
+        "y_as_deflect_file": None,
         "x_pixel_deflect_file": None,
         "y_pixel_deflect_file": None,
         "kappa_file": None,
@@ -341,13 +341,13 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
             assert object_input["psi_file"] is None, "Multiple files match attempted pattern for psi/potential file."
             object_input["psi_file"] = append_path(filename)
         if "x-arcsec-deflect.fits" in filename or "dx.fits" in filename or "deflect_arcsec_x.fits" in filename:
-            assert object_input["x_arcsec_deflect_file"] is None, \
+            assert object_input["x_as_deflect_file"] is None, \
                 "Multiple files match attempted pattern for x [arcsec] deflect file."
-            object_input["x_arcsec_deflect_file"] = append_path(filename)
+            object_input["x_as_deflect_file"] = append_path(filename)
         if "y-arcsec-deflect.fits" in filename or "dy.fits" in filename or "deflect_arcsec_y.fits" in filename:
-            assert object_input["y_arcsec_deflect_file"] is None, \
+            assert object_input["y_as_deflect_file"] is None, \
                 "Multiple files match attempted pattern for y [arcsec] deflect file."
-            object_input["y_arcsec_deflect_file"] = append_path(filename)
+            object_input["y_as_deflect_file"] = append_path(filename)
         if "x-pixels-deflect.fits" in filename:
             assert object_input["x_pixel_deflect_file"] is None, \
                 "Multiple files match attempted pattern for x [px] deflect file."
