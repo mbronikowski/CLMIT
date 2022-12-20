@@ -4,6 +4,7 @@ import numpy as np
 import warnings
 import os
 import re
+import math
 
 from astropy import constants, units, wcs
 from astropy.cosmology import FlatLambdaCDM
@@ -15,6 +16,28 @@ _dilation_erosion_steps = 1                     # TODO: fine tune this?
 _source_plane_map_rel_size = 1
 
 
+class _LUTManager:
+    """LUTManager is the class for _LUTM, this project's lookup table manager.
+
+        Any LUT access in the module is managed by this class. It holds the dictionary for cosmological comoving volume
+        as a function of redshift. Setting a new cosmology resets the lookup table.
+        """
+    def __init__(self):
+        self._comoving_volume_dict = {}
+
+    def get_comoving_volume(self, z):
+        """The preferred method of accessing comoving volume."""
+        if z not in self._comoving_volume_dict:
+            self._comoving_volume_dict[z] = _cosmology.comoving_volume(z)
+        return self._comoving_volume_dict[z]
+
+    def reset_comoving_volume_dict(self):   # Used when setting a new cosmology.
+        self._comoving_volume_dict.clear()
+
+
+_LUTM = _LUTManager()
+
+
 def set_cosmology(new_cosmology):
     """Set astropy cosmology model for calculations in place of the default flat Lambda CDM with H0=70, OmegaM = 0.3.
 
@@ -23,6 +46,7 @@ def set_cosmology(new_cosmology):
     """
     global _cosmology
     _cosmology = new_cosmology
+    _LUTM.reset_comoving_volume_dict()
 
 
 def set_source_plane_size(new_image_scale_factor):
@@ -238,6 +262,9 @@ class ClusterModel:
             self._generate_is_multiply_imaged_map()
         return self._is_multiply_imaged_map
 
+    def get_is_singly_imaged_map(self):
+        return np.ones(self._lensing_map_shape, dtype=int) - self.get_is_multiply_imaged_map()
+
     def _generate_is_multiply_imaged_map(self):
         result_map = np.zeros(self._lensing_map_shape, dtype=int)
         caustic_area_map = self.get_caustic_area_map()
@@ -290,18 +317,25 @@ class ClusterModel:
         # hit_map = cv2.erode(hit_map, None, iterations=_dilation_erosion_steps)
         return hit_map
 
-    def corresponding_plane_area(self, pixel_map, plane_redshift=None):
+    def map_solid_angle(self, pixel_map):
         """Calculate the area marked by integer 1s in pixel_map at given redshift, returns an astropy Quantity."""
-        if plane_redshift is None:
-            plane_redshift = self.source_z
-        dist_source = _cosmology.angular_diameter_distance_z1z2(0, plane_redshift)
-        pixel_area = dist_source ** 2 * self.wcs.proj_plane_pixel_area().to(units.rad ** 2) / units.rad ** 2
+        pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
         values, counts = np.unique(pixel_map, return_counts=True)
         values_counts = dict(zip(values, counts))
         return pixel_area * values_counts[1]
 
-    def caustic_area(self):
-        return self.corresponding_plane_area(self.get_caustic_area_map(), self.source_z)
+    def caustic_area_solid_angle(self):
+        return self.map_solid_angle(self.get_caustic_area_map())
+
+    def solid_angle_from_magnif(self, magnif_map_mask):
+        pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
+        magnif_map = self.get_magnification_map()
+        area_in_px = 0.
+        for y in range(magnif_map.shape[0]):
+            for x in range(magnif_map.shape[1]):
+                if not magnif_map_mask[y, x] == 0:
+                    area_in_px += 1 / magnif_map[y, x]
+        return pixel_area * area_in_px
 
 
 _gamma_regex = re.compile(r'(gamma|shear)[^12]*$')
@@ -358,3 +392,20 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
             object_input["y_pixel_deflect_file"] = append_path(filename)
     return ClusterModel(**object_input)
 
+
+def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **kwargs):
+    """Takes a cluster model and an array of z bins and generates a histogram of delensed comoving volumes in bins."""
+    map_is_callable = callable(lens_plane_map)
+    result_list = []
+    for i in range(len(redshift_bins) - 1):
+        mid_z = (redshift_bins[i] + redshift_bins[i+1]) / 2
+        cluster_model.set_source_z(mid_z)
+        if map_is_callable:
+            source_plane_map = cluster_model.map_to_source_plane(lens_plane_map(*args, **kwargs))
+        else:
+            source_plane_map = cluster_model.map_to_source_plane(lens_plane_map)
+        vol_in_bin = (cluster_model.map_solid_angle(source_plane_map)
+                      / (4 * math.pi * units.rad ** 2)
+                      * (_LUTM.get_comoving_volume(redshift_bins[i+1]) - _LUTM.get_comoving_volume(redshift_bins[i])))
+        result_list.append(vol_in_bin)
+    return units.Quantity(result_list, units.Mpc ** 3)      # Converting list of Quantity objects to one Quantity.
