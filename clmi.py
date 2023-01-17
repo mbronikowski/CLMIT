@@ -228,7 +228,8 @@ class ClusterModel:
         return self._magnification_map
 
     def _generate_magnification_map(self):
-        self._magnification_map = magnification(self.kappa_map, self.gamma_map, self.distance_ratio)
+        self._magnification_map = np.nan_to_num(magnification(self.kappa_map, self.gamma_map, self.distance_ratio),
+                                                nan=1.0)
 
     def get_critical_area_map(self):
         """Public method to access the map of the cluster's region inside the critical curve, with 1s inside it.."""
@@ -266,6 +267,7 @@ class ClusterModel:
         return np.ones(self._lensing_map_shape, dtype=int) - self.get_is_multiply_imaged_map()
 
     def _generate_is_multiply_imaged_map(self):
+        nan_encountered = False
         result_map = np.zeros(self._lensing_map_shape, dtype=int)
         caustic_area_map = self.get_caustic_area_map()
         critical_area_map = self.get_critical_area_map()
@@ -273,6 +275,10 @@ class ClusterModel:
             for x in range(self._lensing_map_shape[1]):
                 if critical_area_map[y, x] == 1:
                     result_map[y, x] = 1
+                elif math.isnan(self.y_pixel_deflect_map[y, x]) or math.isnan(self.x_pixel_deflect_map[y, x]):
+                    if not nan_encountered:
+                        nan_encountered = True
+                        warnings.warn("NaN encountered in deflection maps.")
                 else:
                     y_mapped = int(y
                                    - self.y_pixel_deflect_map[y, x] * self.distance_ratio
@@ -300,17 +306,23 @@ class ClusterModel:
         hit_map = np.zeros(self._source_plane_map_shape, dtype=int)
         offset = self._source_plane_map_offset
         mapping_warning_issued = False
+        nan_encountered = False
         for y in range(lens_plane_map.shape[0]):
             for x in range(lens_plane_map.shape[1]):
                 if lens_plane_map[y, x] > 0:        # "If the pixel in the lens plane is meant to be mapped"
-                    y_hit = int(y - self.y_pixel_deflect_map[y, x] * self.distance_ratio + offset[0])
-                    x_hit = int(x - self.x_pixel_deflect_map[y, x] * self.distance_ratio + offset[1])
-                    if 0 <= y_hit < hit_map.shape[0] and 0 <= x_hit < hit_map.shape[1]:
-                        hit_map[y_hit, x_hit] = 1
-                    elif not mapping_warning_issued:
-                        warnings.warn("Some of the area passed to this function is mapped outside the generated " +
-                                      "source plane map. This WILL affect area calculations.")
-                        mapping_warning_issued = True
+                    if math.isnan(self.y_pixel_deflect_map[y, x]) or math.isnan(self.x_pixel_deflect_map[y, x]):
+                        if not nan_encountered:
+                            nan_encountered = True
+                            warnings.warn("NaN encountered in deflection maps.")
+                    else:
+                        y_hit = int(y - self.y_pixel_deflect_map[y, x] * self.distance_ratio + offset[0])
+                        x_hit = int(x - self.x_pixel_deflect_map[y, x] * self.distance_ratio + offset[1])
+                        if 0 <= y_hit < hit_map.shape[0] and 0 <= x_hit < hit_map.shape[1]:
+                            hit_map[y_hit, x_hit] = 1
+                        elif not mapping_warning_issued:
+                            warnings.warn("Some of the area passed to this function is mapped outside the generated " +
+                                          "source plane map. This WILL affect area calculations.")
+                            mapping_warning_issued = True
         # Now we have a raw map, e.g. from the critical to caustic curve.
         # If for some reason the map isn't solid, i.e. there are empty spots between mapped pixels:
         # hit_map = cv2.dilate(hit_map, None, iterations=_dilation_erosion_steps)   # This requires hit_map to be float
