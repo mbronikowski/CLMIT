@@ -467,7 +467,7 @@ def volumetric_sn_rate(z_range, sn_type='cc', sfh="strolger20"):
         rcc = k_cc * h ** 2 * sfr_a * (1 + z) ** sfr_c / (((1 + z) / sfr_b) ** sfr_d + 1)
         return rcc
 
-    def calculate_ria(z):
+    def calculate_ria(z, h):
         """Calculates the SN Ia rate for a given redshift, using the simple broken power law from Strolger (2020).
 
         The function uses a law provided by Strolger et al., 2020, DOI: 10.3847/1538-4357/ab6a97
@@ -480,18 +480,18 @@ def volumetric_sn_rate(z_range, sn_type='cc', sfh="strolger20"):
         if isinstance(z, np.ndarray):
             mask = z >= 1
             result = np.zeros_like(z, dtype=object)
-            result[~mask] = r0_low_z * (1 + z[~mask]) ** exponent_low_z
-            result[mask] = r0_high_z * (1 + z[mask]) ** exponent_high_z
+            result[~mask] = r0_low_z * (1 + z[~mask]) ** exponent_low_z * (h / 0.7**3)
+            result[mask] = r0_high_z * (1 + z[mask]) ** exponent_high_z * (h / 0.7**3)
             return result
         else:
             if z < 1:
-                return r0_low_z * (1 + z) ** exponent_low_z
+                return r0_low_z * (1 + z) ** exponent_low_z * (h / 0.7**3)
             else:
-                return r0_high_z * (1 + z) ** exponent_high_z
+                return r0_high_z * (1 + z) ** exponent_high_z * (h / 0.7**3)
 
     if sn_type == "cc":
         return calculate_rcc(z_range, _cosmology.h)
     elif sn_type == "ia":
-        return calculate_ria(z_range)
+        return calculate_ria(z_range, _cosmology.h)
     else:
         raise ValueError(f"sn_type must be cc for core collapse or ia for Type Ia; {sn_type} was provided.")
