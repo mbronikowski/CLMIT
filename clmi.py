@@ -8,11 +8,12 @@ import math
 import uncertainties as unc
 
 from astropy import constants, units, wcs
+from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
 from astropy.io import fits
 from scipy.ndimage.measurements import label
 
-_cosmology = FlatLambdaCDM(H0=70, Om0=0.3)
+_cosmology = FlatLambdaCDM(H0=70, Om0=0.3)      # Default cosmology assumptions. Change with set_cosmology()
 _dilation_erosion_steps = 1                     # TODO: fine tune this?
 _source_plane_map_rel_size = 1
 
@@ -112,22 +113,27 @@ def _flood_fill(array, start_pixel, targeted_val, new_val):
 class ClusterModel:
     """Handles individual cluster models and calculations based on them.
 
-    Keyword arguments:
-    cluster_z -- redshift of the cluster (default 1.0)
-    source_z -- redshift of the source plane for which calculations are made (default 9.0)
-    kappa_file -- cluster lensing convergence map, either a FITS file or path to a FITS file (default None)
-    gamma_file -- cluster lensing total shear map, either a FITS file or path to a FITS file (default None)
-    psi_file -- cluster lensing potential map, either a FITS file or path to a FITS file (default None)
-    x_pixel_deflect_file -- cluster lensing x axis deflection map measured in pixels,
-        either a FITS file or path to a FITS file (default None)
-    y_pixel_deflect_file -- cluster lensing y axis deflection map measured in pixels,
-        either a FITS file or path to a FITS file (default None)
-    x_as_deflect_file -- cluster lensing x axis deflection map measured in arcseconds,
-        either a FITS file or path to a FITS file (default None)
-    y_as_deflect_file -- cluster lensing y axis deflection map measured in arcseconds,
-        either a FITS file or path to a FITS file (default None)
-    map_wcs -- astropy World Coordinate System object to be used by the class.
-        If not provided, the object will attempt to load one from provided maps (default None)
+    Parameters:
+        cluster_z -- redshift of the cluster (default 1.0)
+        source_z -- redshift of the source plane for which calculations are made (default 9.0)
+        kappa_file -- cluster lensing convergence map, either a FITS file or path to a FITS file (default None)
+        gamma_file -- cluster lensing total shear map, either a FITS file or path to a FITS file (default None)
+        psi_file -- cluster lensing potential map, either a FITS file or path to a FITS file (default None)
+        x_pixel_deflect_file -- cluster lensing x axis deflection map measured in pixels,
+            either a FITS file or path to a FITS file (default None)
+        y_pixel_deflect_file -- cluster lensing y axis deflection map measured in pixels,
+            either a FITS file or path to a FITS file (default None)
+        x_as_deflect_file -- cluster lensing x axis deflection map measured in arcseconds,
+            either a FITS file or path to a FITS file (default None)
+        y_as_deflect_file -- cluster lensing y axis deflection map measured in arcseconds,
+            either a FITS file or path to a FITS file (default None)
+        map_wcs -- astropy World Coordinate System object to be used by the class.
+            If not provided, the object will attempt to load one from provided maps (default None)
+
+    Methods:
+    TBD
+    Attributes:
+    TBD
     """     # TODO: expand documentation
 
     def __init__(self, cluster_z=1., source_z=9., kappa_file=None, gamma_file=None,
@@ -232,6 +238,64 @@ class ClusterModel:
         self._magnification_map = np.nan_to_num(magnification(self.kappa_map, self.gamma_map, self.distance_ratio),
                                                 nan=1.0)
 
+    def point_magnification(self, points, redshifts=None, coord_units=None):
+        """Extracts magnification for a given point or set of points.
+
+        Parameters:
+            points : string or astropy.coordinates.SkyCoord object or iterable thereof
+                Set of points for which magnifications are to be computed.
+            redshifts (default None) : float or iterable of floats
+                Set of corresponding redshifts for which magnifications are to be computed.
+                If none are provided, all magnifications will be computed for the default source-z
+            coord_units (default None) : Unit, str, or tuple of Unit or str, optional
+                If points is of str type, this will be passed to an astropy.coordinates.SkyCoord object 
+                for coordinate calculations
+        Returns:
+        magnifications : np.ndarray
+            np.ndarray object with magnification values for every point in the provided data.
+        """
+        def str_to_skycoord(string):
+            if coord_units is not None:
+                return SkyCoord(string, unit=coord_units)
+            else:
+                return SkyCoord(string)
+
+        # Handle one point:
+
+        if isinstance(points, str):
+            points = str_to_skycoord(points)
+
+        if points.shape == ():
+            if redshifts is not None:
+                scaling_factor = lensing_scaling_factor(self.cluster_z, redshifts)
+            else:
+                scaling_factor = self.distance_ratio
+            x_coord, y_coord = self.wcs.world_to_pixel(points)
+            x_coord, y_coord = round(float(x_coord)), round(float(y_coord))       # Cast to int
+            kappa, gamma = self.kappa_map[y_coord, x_coord], self.gamma_map[y_coord, x_coord]
+            magnifications = magnification(kappa, gamma, scaling_factor)
+            return magnifications
+
+        # Now handle iterable inputs:
+
+        magnifications = np.empty(points.shape)
+        for i, point in enumerate(points):
+            if isinstance(point, str):
+                if coord_units is not None:
+                    point = SkyCoord(point, unit=coord_units)
+                else:
+                    point = SkyCoord(point)
+            x_coord, y_coord = self.wcs.world_to_pixel(point)
+            x_coord, y_coord = round(float(x_coord)), round(float(y_coord))       # Cast to int
+            kappa, gamma = self.kappa_map[y_coord, x_coord], self.gamma_map[y_coord, x_coord]
+            if redshifts is None:
+                scaling_factor = self.distance_ratio
+            else:
+                scaling_factor = lensing_scaling_factor(self.cluster_z, redshifts[i])
+            magnifications[i] = magnification(kappa, gamma, scaling_factor)
+
+        return magnifications
+
     def get_critical_area_map(self):
         """Public method to access the map of the cluster's region inside the critical curve, with 1s inside it.."""
         if self._critical_area_map is None:
@@ -331,7 +395,7 @@ class ClusterModel:
         return hit_map
 
     def map_solid_angle(self, pixel_map):
-        """Calculate the area marked by integer 1s in pixel_map at given redshift, returns an astropy Quantity."""
+        """Calculate angular area marked by integer 1s in pixel_map at given redshift, returns an astropy Quantity."""
         pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
         values, counts = np.unique(pixel_map, return_counts=True)
         values_counts = dict(zip(values, counts))
@@ -478,7 +542,7 @@ def volumetric_sn_rate(z_range, sn_type='cc', sfh="strolger20"):
         exponent_high_z = unc.ufloat(-0.1, 0.2)
         r0_high_z = r0_low_z * 2 ** (exponent_low_z - exponent_high_z)
         if isinstance(z, np.ndarray):
-            mask = z >= 1
+            mask = z > 1
             result = np.zeros_like(z, dtype=object)
             result[~mask] = r0_low_z * (1 + z[~mask]) ** exponent_low_z * (h / 0.7**3)
             result[mask] = r0_high_z * (1 + z[mask]) ** exponent_high_z * (h / 0.7**3)
