@@ -50,7 +50,7 @@ def set_cosmology(new_cosmology):
     _cosmology = new_cosmology
     _LUTM.reset_comoving_volume_dict()
     for instance in ClusterModel.active_instances:
-        instance.source_z = instance.source_z
+        instance.source_z = instance.source_z       # Not very surgical, but will trigger a reset of z-dependent maps.
 
 
 def set_source_plane_size(new_image_scale_factor):
@@ -151,13 +151,9 @@ class ClusterModel:
         set_source_z: Set a new source redshift for the cluster.
         get_magnification_map: Get a magnification map for the cluster model.
         point_magnification: Calculate magnification for a set of individual points.
-        get_critical_area_map: Get a map of the area inside the critical curve in the lens plane.
-        get_critical_curve: Get a map of the critical curve in the source plane.
-        get_caustic_area_map: Obtain a map of the area inside the caustic curve in the source plane.
-        get_is_multiply_imaged_map: Obtain a map of the area in the source plane where objects are multiply imaged.
-        get_is_singly_imaged_map: Obtain a map of the area in the source plane where objects are singly imaged.
         map_to_source_plane: Map an area from the lens plane to the source plane.
         map_solid_angle: Calculate the solid angle marked by a map.
+
     :attributes:
         :cvar list active_instances: Stores references to all active instances.
         :ivar wcs: stores model maps.
@@ -177,13 +173,20 @@ class ClusterModel:
         :ivar y_as_deflect_map : np.ndarray or None. Map of light deflection in the y axis, in arcseconds.
         :type y_as_deflect_map: np.ndarray or None
         :ivar float cluster_z: Redshift of the cluster, used in most calculations.
-        :ivar float source_z: Redshift of the source for which most model calculations are made.
         :ivar cluster_angular_diameter_distance: Cosmological angular diameter distance to the cluster.
         :type cluster_angular_diameter_distance: astropy.units.Quantity
         :ivar source_angular_diameter_distance: Cosmological angular diameter distance to the source.
         :type source_angular_diameter_distance: astropy.units.Quantity
         :ivar float distance_ratio: Ratio of angular diameter distances from lens to source and from observer to source.
         :ivar float distance_param: Used in time delay equation, see https://arxiv.org/pdf/astro-ph/9606001.pdf Eq. 63.
+
+    :properties:
+        source_z (float): Redshift of the source for which most model calculations are made.
+        critical_area_map (np.ndarray): Map of the area inside the critical curve in the lens plane.
+        critical_curve (np.ndarray): Map of the critical curve in the source plane.
+        caustic_area_map (np.ndarray): Map of the area inside the caustic curve in the source plane.
+        is_multiply_imaged_map (np.ndarray): Map of the area in the source plane where objects are multiply imaged.
+        is_singly_imaged_map (np.ndarray): Map of the area in the source plane where objects are singly imaged.
     """
 
     active_instances = []      # Used by the module's set_cosmology function to trigger a calculated data reset.
@@ -384,13 +387,15 @@ class ClusterModel:
 
     critical_area_map = property(fget=_get_critical_area_map)
 
-    def get_critical_curve(self):
+    def _get_critical_curve(self):
         magnif_map = self._get_magnification_map()
         magnif_sign = np.zeros(magnif_map.shape)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map > 0.)] = 1
         magnif_sign_eroded = cv2.erode(magnif_sign, None, iterations=1)
         magnif_sign_dilated = cv2.dilate(magnif_sign, None, iterations=1)
         return (magnif_sign_dilated - magnif_sign_eroded).astype(int)
+
+    critical_curve = property(fget=_get_critical_curve)
 
     def _get_caustic_area_map(self):
         """Obtain a map of the area inside the caustic curve in the source plane.
@@ -576,7 +581,7 @@ def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **
     result_list = []
     for i in range(len(redshift_bins) - 1):
         mid_z = (redshift_bins[i] + redshift_bins[i+1]) / 2
-        cluster_model._set_source_z(mid_z)
+        cluster_model.source_z = mid_z
         if map_is_callable:
             source_plane_map = cluster_model.map_to_source_plane(lens_plane_map(*args, **kwargs))
         else:
@@ -586,5 +591,3 @@ def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **
                       * (_LUTM.get_comoving_volume(redshift_bins[i+1]) - _LUTM.get_comoving_volume(redshift_bins[i])))
         result_list.append(vol_in_bin)
     return units.Quantity(result_list, units.Mpc ** 3)      # Converting list of Quantity objects to one Quantity.
-
-
