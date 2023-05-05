@@ -14,15 +14,16 @@ from astropy.io import fits
 from scipy.ndimage.measurements import label
 
 _cosmology = FlatLambdaCDM(H0=70, Om0=0.3)      # Default cosmology assumptions. Change with set_cosmology()
-_dilation_erosion_steps = 1                     # TODO: fine tune this?
+_dilation_erosion_steps = 1
 _source_plane_map_rel_size = 1
 
 
 class _LUTManager:
     """LUTManager is the class for _LUTM, this project's lookup table manager.
 
-        Any LUT access in the module is managed by this class. It holds the dictionary for cosmological comoving volume
-        as a function of redshift. Setting a new cosmology resets the lookup table.
+        Any lookup tqable (LUT) access in the module is managed by this class.
+        It holds the dictionary for cosmological comoving volume as a function of redshift.
+        Setting a new cosmology resets the lookup table.
         """
     def __init__(self):
         self._comoving_volume_dict = {}
@@ -49,6 +50,8 @@ def set_cosmology(new_cosmology):
     global _cosmology
     _cosmology = new_cosmology
     _LUTM.reset_comoving_volume_dict()
+    for instance in ClusterModel.active_instances:
+        instance.set_source_z(instance.source_z)
 
 
 def set_source_plane_size(new_image_scale_factor):
@@ -81,8 +84,15 @@ def distance_parameter(z_lens, z_source):       # TODO: rename?
     return dist_deflector * dist_source / dist_deflector_source
 
 
-def magnification(kappa, gamma, scaling_factor):  # Works for both individual numbers and np arrays.
-    """Basic lensing formula for magnification based on convergence (kappa) and shear (gamma) for given Dds/Ds."""
+def magnification(kappa, gamma, scaling_factor):
+    """Basic lensing formula for magnification based on convergence (kappa) and shear (gamma) for given Dds/Ds.
+
+    :param kappa: Lensing convergence parameter or array thereof.
+    :type kappa: float or np.ndarray
+    :param gamma: Lensing shear parameter or an array thereof.
+    :type gamma: float or np.ndarray
+    :param float scaling_factor: Ratio of angular diameter distances from lens to source and from observer to source.
+    """
     return ((1 - kappa * scaling_factor) ** 2 - (gamma * scaling_factor) ** 2) ** -1
 
 
@@ -113,28 +123,71 @@ def _flood_fill(array, start_pixel, targeted_val, new_val):
 class ClusterModel:
     """Handles individual cluster models and calculations based on them.
 
-    Parameters:
-        cluster_z -- redshift of the cluster (default 1.0)
-        source_z -- redshift of the source plane for which calculations are made (default 9.0)
-        kappa_file -- cluster lensing convergence map, either a FITS file or path to a FITS file (default None)
-        gamma_file -- cluster lensing total shear map, either a FITS file or path to a FITS file (default None)
-        psi_file -- cluster lensing potential map, either a FITS file or path to a FITS file (default None)
-        x_pixel_deflect_file -- cluster lensing x axis deflection map measured in pixels,
-            either a FITS file or path to a FITS file (default None)
-        y_pixel_deflect_file -- cluster lensing y axis deflection map measured in pixels,
-            either a FITS file or path to a FITS file (default None)
-        x_as_deflect_file -- cluster lensing x axis deflection map measured in arcseconds,
-            either a FITS file or path to a FITS file (default None)
-        y_as_deflect_file -- cluster lensing y axis deflection map measured in arcseconds,
-            either a FITS file or path to a FITS file (default None)
-        map_wcs -- astropy World Coordinate System object to be used by the class.
-            If not provided, the object will attempt to load one from provided maps (default None)
+    :params:
+        :param float cluster_z: Redshift of the cluster. Default is 1.0.
+        :param float source_z: Redshift of the source plane for which calculations are made. Default is 9.0.
+        :param kappa_file: Cluster lensing convergence map, either a FITS file or path to a FITS file. Default is None.
+        :type kappa_file: str or None or astropy HDUList
+        :param gamma_file: Cluster lensing total shear map, either a FITS file or path to a FITS file. Default is None.
+        :type gamma_file: str or None or astropy HDUList
+        :param psi_file: Cluster lensing potential map, either a FITS file or path to a FITS file. Default is None.
+        :type psi_file: str or None or astropy HDUList
+        :param x_pixel_deflect_file: Cluster lensing x axis deflection map measured in pixels,
+                                     either a FITS file or path to a FITS file. Default is None.
+        :type x_pixel_deflect_file: str or None or astropy HDUList
+        :param y_pixel_deflect_file: Cluster lensing y axis deflection map measured in pixels,
+                                     either a FITS file or path to a FITS file. Default is None.
+        :type y_pixel_deflect_file: str or None or astropy HDUList
+        :param x_as_deflect_file: Cluster lensing x axis deflection map measured in arcseconds,
+                                  either a FITS file or path to a FITS file. Default is None.
+        :type x_as_deflect_file: str or None or astropy HDUList
+        :param y_as_deflect_file: Cluster lensing y axis deflection map measured in arcseconds,
+                                  either a FITS file or path to a FITS file. Default is None.
+        :type y_as_deflect_file: str or None or astropy HDUList
+        :param map_wcs: Astropy World Coordinate System object to be used by the class.
+                        If not provided, the object will attempt to load one from provided maps. Default is None.
+        :type map_wcs: astropy.wcs.WCS or None
 
-    Methods:
-    TBD
-    Attributes:
-    TBD
-    """     # TODO: expand documentation
+    :methods:
+        set_source_z: Set a new source redshift for the cluster.
+        get_magnification_map: Get a magnification map for the cluster model.
+        point_magnification: Calculate magnification for a set of individual points.
+        get_critical_area_map: Get a map of the area inside the critical curve in the lens plane.
+        get_critical_curve: Get a map of the critical curve in the source plane.
+        get_caustic_area_map: Obtain a map of the area inside the caustic curve in the source plane.
+        get_is_multiply_imaged_map: Obtain a map of the area in the source plane where objects are multiply imaged.
+        get_is_singly_imaged_map: Obtain a map of the area in the source plane where objects are singly imaged.
+        map_to_source_plane: Map an area from the lens plane to the source plane.
+        map_solid_angle: Calculate the solid angle marked by a map.
+    :attributes:
+        :cvar list active_instances: Stores references to all active instances.
+        :ivar wcs: stores model maps.
+        :type wcs: astropy.wcs.WCS or None
+        :ivar kappa_map: Map of the lensing convergence / kappa parameter.
+        :type kappa_map: np.ndarray or None
+        :ivar gamma_map: Map of the lensing shear / gamma parameter.
+        :type gamma_map: np.ndarray or None
+        :ivar psi_map: Map of the lensing gravitational potential / psi parameter.
+        :type psi_map: np.ndarray or None
+        :ivar x_pixel_deflect_map: Map of light deflection in the x axis, in pixels.
+        :type x_pixel_deflect_map: np.ndarray or None
+        :ivar y_pixel_deflect_map : Map of light deflection in the y axis, in pixels.
+        :type y_pixel_deflect_map: np.ndarray or None
+        :ivar x_as_deflect_map : np.ndarray or None. Map of light deflection in the x axis, in arcseconds.
+        :type x_as_deflect_map: np.ndarray or None
+        :ivar y_as_deflect_map : np.ndarray or None. Map of light deflection in the y axis, in arcseconds.
+        :type y_as_deflect_map: np.ndarray or None
+        :ivar float cluster_z: Redshift of the cluster, used in most calculations.
+        :ivar float source_z: Redshift of the source for which most model calculations are made.
+        :ivar cluster_angular_diameter_distance: Cosmological angular diameter distance to the cluster.
+        :type cluster_angular_diameter_distance: astropy.units.Quantity
+        :ivar source_angular_diameter_distance: Cosmological angular diameter distance to the source.
+        :type source_angular_diameter_distance: astropy.units.Quantity
+        :ivar float distance_ratio: Ratio of angular diameter distances from lens to source and from observer to source.
+        :ivar float distance_param: Used in time delay equation, see https://arxiv.org/pdf/astro-ph/9606001.pdf Eq. 63.
+    """
+
+    active_instances = []      # Used by the module's set_cosmology function to trigger a calculated data reset.
 
     def __init__(self, cluster_z=1., source_z=9., kappa_file=None, gamma_file=None,
                  psi_file=None, x_pixel_deflect_file=None, y_pixel_deflect_file=None,
@@ -171,8 +224,8 @@ class ClusterModel:
             return data_table       # TODO: functionality for passing np tables with data?
 
         if cluster_z > source_z:
-            raise ValueError("Source cannot be placed in front of the cluster! source_z < cluster_z detected: " +
-                             str(source_z))
+            raise ValueError(f"Source cannot be placed in front of the cluster! \
+            source_z < cluster_z detected: {str(source_z)} < {str(cluster_z)}")
         self.wcs = map_wcs
         self._lensing_map_shape = None
         self.kappa_map = check_and_load_data(kappa_file)
@@ -205,8 +258,17 @@ class ClusterModel:
         if self.wcs is None:
             warnings.warn("The cluster model was unable to load a working World Coordinate System from provided files.")
 
+        self.active_instances.append(self)
+
+    def __del__(self):
+        self.active_instances.remove(self)
+
     def set_source_z(self, new_z):
-        """Set the redshift for which parameters will be calculated and reset previously computed z-dependent values."""
+        """Set the redshift for which parameters will be calculated and reset previously computed z-dependent values.
+
+        :params:
+            :param float new_z: New redshift for which calculations will be made.
+        """
         if new_z < self.cluster_z:
             raise ValueError("Source cannot be placed in front of the cluster! source_z < cluster_z detected: " +
                              str(new_z))
@@ -230,6 +292,11 @@ class ClusterModel:
         self.y_pixel_deflect_map = self.y_as_deflect_map.copy() / pixel_scale
 
     def get_magnification_map(self):
+        """Obtain the magnification map for the model and source redshift.
+
+        :returns: Magnification map for the cluster model and source redshift.
+        :rtype: np.ndarray
+        """
         if self._magnification_map is None:
             self._generate_magnification_map()
         return self._magnification_map
@@ -239,20 +306,20 @@ class ClusterModel:
                                                 nan=1.0)
 
     def point_magnification(self, points, redshifts=None, coord_units=None):
-        """Extracts magnification for a given point or set of points.
+        """
+        Extracts magnification for a given point or set of points.
 
-        Parameters:
-            points : string or astropy.coordinates.SkyCoord object or iterable thereof
-                Set of points for which magnifications are to be computed.
-            redshifts (default None) : float or iterable of floats
-                Set of corresponding redshifts for which magnifications are to be computed.
-                If none are provided, all magnifications will be computed for the default source-z
-            coord_units (default None) : Unit, str, or tuple of Unit or str, optional
-                If points is of str type, this will be passed to an astropy.coordinates.SkyCoord object 
-                for coordinate calculations
-        Returns:
-        magnifications : np.ndarray
-            np.ndarray object with magnification values for every point in the provided data.
+        :param points: Set of points for which magnifications are to be computed.
+                       Can be a string, astropy.coordinates.SkyCoord object, or iterable thereof.
+        :type points: str or astropy.coordinates.SkyCoord or iterable
+        :param redshifts: Set of corresponding redshifts for which magnifications are to be computed.
+                          If none are provided, all magnifications will be computed for the instance's source_z.
+        :type redshifts: float or iterable of floats or None
+        :param coord_units: If points is of str type, this will be passed to an astropy.coordinates.SkyCoord object
+                            for coordinate calculations.
+        :type coord_units: astropy.units.Unit or str or tuple of astropy.units.Unit or str or None
+        :returns: Magnification values for every point in the provided data.
+        :rtype: float or np.ndarray
         """
         def str_to_skycoord(string):
             if coord_units is not None:
@@ -277,7 +344,8 @@ class ClusterModel:
             return magnifications
 
         # Now handle iterable inputs:
-
+        if isinstance(redshifts, float):
+            redshifts = np.array([redshifts] * points.shape[0])     # If only one z provided, assume it for all points
         magnifications = np.empty(points.shape)
         for i, point in enumerate(points):
             if isinstance(point, str):
@@ -297,7 +365,11 @@ class ClusterModel:
         return magnifications
 
     def get_critical_area_map(self):
-        """Public method to access the map of the cluster's region inside the critical curve, with 1s inside it.."""
+        """Obtain a map of the area inside the critical curve in the lens plane.
+
+        :returns: Map of the area inside the critical curve, with 1 for inside, 0 for outside.
+        :rtype: np.ndarray
+        """
         if self._critical_area_map is None:
             self._generate_critical_area_map()
         return self._critical_area_map
@@ -309,7 +381,7 @@ class ClusterModel:
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
-    def _generate_critical_curve(self):
+    def get_critical_curve(self):
         magnif_map = self.get_magnification_map()
         magnif_sign = np.zeros(magnif_map.shape)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map > 0.)] = 1
@@ -318,17 +390,31 @@ class ClusterModel:
         return (magnif_sign_dilated - magnif_sign_eroded).astype(int)
 
     def get_caustic_area_map(self):
-        """Public method to access the map of the region inside the caustic curve, denoted by 1s."""
+        """Obtain a map of the area inside the caustic curve in the source plane.
+
+        :returns: Map of the area inside the caustic curve, with 1 for inside, 0 for outside.
+        :rtype: np.ndarray
+        """
         if self._caustic_area_map is None:
             self._caustic_area_map = self.map_to_source_plane(self.get_critical_area_map())
         return self._caustic_area_map
 
     def get_is_multiply_imaged_map(self):
+        """Obtain a map of the area in the source plane where objects are multiply imaged.
+
+            :returns: Map of the multiply imaged area, with 1 for multiply-, 0 for singly-imaged.
+            :rtype: np.ndarray
+        """
         if self._is_multiply_imaged_map is None:
             self._generate_is_multiply_imaged_map()
         return self._is_multiply_imaged_map
 
     def get_is_singly_imaged_map(self):
+        """Obtain a map of the area in the source plane where objects are singly imaged.
+
+                :returns: Map of the multiply imaged area, with 0 for multiply-, 1 for singly-imaged.
+                :rtype: np.ndarray
+        """
         return np.ones(self._lensing_map_shape, dtype=int) - self.get_is_multiply_imaged_map()
 
     def _generate_is_multiply_imaged_map(self):
@@ -359,7 +445,11 @@ class ClusterModel:
     def map_to_source_plane(self, lens_plane_map):
         """Map arbitrary area from the lens plane to the source plane.
 
-        The input needs to be a numpy array of integers with 1s for pixels which are to be mapped, 0s otherwise.
+            :param np.ndarray(int) lens_plane_map: Map to be mapped to source plane.
+                    Area which is to be mapped should be denoted by 1s, the rest by 0s.
+            :returns: Map in the source plane, where 1s correspond to the area with 1s in the lens plane.
+            :rtype: np.ndarray
+
         The function will fill in any holes in the mapped source plane area; the function does not handle areas with
         holes in them in the source plane. This aids with numerical issues inside the caustic curve.
         """
@@ -420,7 +510,7 @@ _kappa_regex = re.compile(r'(kappa|convergence)[^12]*$')
 _psi_regex = re.compile(r'(psi|poten)[^12]*fits$')
 
 
-def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate.
+def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate, but it works.
     """Attempt to load data into a ClusterModel object from a folder, assuming typical filenames were used."""
     # This is disgusting boilerplate, but I guess it works.
     def append_path(file_name):
