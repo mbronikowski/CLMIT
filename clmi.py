@@ -5,7 +5,6 @@ import warnings
 import os
 import re
 import math
-import uncertainties as unc
 
 from astropy import constants, units, wcs
 from astropy.coordinates import SkyCoord
@@ -579,73 +578,3 @@ def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **
     return units.Quantity(result_list, units.Mpc ** 3)      # Converting list of Quantity objects to one Quantity.
 
 
-def volumetric_sn_rate(z_range, sn_type='cc', sfh="strolger20"):
-    """Calculate the volumetric supernova rate from selected papers, assuming the cosmology set in the module.
-
-    Arguments:
-        z_range (int or float or numpy.ndarray) -- Redshift or set of redshifts at which the SN rate is calculated.
-        sn_type (str, default: "cc") -- Type of supernova for which the SN rate is calculated. Can be "cc" or "ia".
-        sfh (str, default: "strolger20") -- Publication from which the star formation rate is taken for core collapse
-            supernovae. Can be:
-            - "strolger15" for Strolger et al. (2015), DOI: 10.1088/0004-637X/813/2/93
-            - "strolger20" (default) for  Strolger et al., 2020, DOI: 10.3847/1538-4357/ab6a97
-    Returns:
-        uncertainties.ufloat or uncertainties.unumpy object containing the volumetric sn rate, measured in yr^-1 Mpc^-3.
-    """
-    # Casefold input strings to ease comparison.
-    sfh = sfh.casefold()
-    sn_type = sn_type.casefold()
-    # Set star formation history that the user selects. sfr_a through d
-    # are parameters for the commonly assumed parametrization of the cosmic SFH.
-    if sfh == "strolger20":      # Strolger et al., 2020, DOI: 10.3847/1538-4357/ab6a97
-        sfr_a = unc.ufloat(0.0134, 0.0009)
-        sfr_b = unc.ufloat(2.55, 0.09)
-        sfr_c = unc.ufloat(3.3, 0.2)
-        sfr_d = unc.ufloat(6.1, 0.2)
-    elif sfh == "strolger15":    # Strolger et al. (2015), DOI: 10.1088/0004-637X/813/2/93
-        sfr_a = unc.ufloat(0.015, 0.009)
-        sfr_b = unc.ufloat(1.5, 0.2)
-        sfr_c = unc.ufloat(5.0, 0.7)
-        sfr_d = unc.ufloat(6.1, 0.5)
-    else:
-        raise ValueError(f"Star formation history {sfh} is not supported.")
-
-    # What is the percentage of stars that can become progenitors of these SNe?
-    k_cc = unc.ufloat(0.0091, 0.0017)       # Core collapse star fraction, Strolger 2015
-
-    def calculate_rcc(z, h, delta_h=0.0):
-        """Calculate the CC SN rate for a given redshift."""
-        # Define the input variables as uncertainties
-        h = unc.ufloat(h, delta_h)
-        # Calculate Rcc using the formula from Strolger 2015 Equation 8
-        rcc = k_cc * h ** 2 * sfr_a * (1 + z) ** sfr_c / (((1 + z) / sfr_b) ** sfr_d + 1)
-        return rcc
-
-    def calculate_ria(z, h):
-        """Calculates the SN Ia rate for a given redshift, using the simple broken power law from Strolger (2020).
-
-        The function uses a law provided by Strolger et al., 2020, DOI: 10.3847/1538-4357/ab6a97
-        It consists of two power laws: one in the 0 < z < 1 range, one in the z > 1 range.
-        """
-        r0_low_z = unc.ufloat(2.40e-5, 0.02e-5)
-        exponent_low_z = unc.ufloat(1.55, 0.02)
-        exponent_high_z = unc.ufloat(-0.1, 0.2)
-        r0_high_z = r0_low_z * 2 ** (exponent_low_z - exponent_high_z)
-        if isinstance(z, np.ndarray):
-            mask = z > 1
-            result = np.zeros_like(z, dtype=object)
-            result[~mask] = r0_low_z * (1 + z[~mask]) ** exponent_low_z * (h / 0.7**3)
-            result[mask] = r0_high_z * (1 + z[mask]) ** exponent_high_z * (h / 0.7**3)
-            return result
-        else:
-            if z < 1:
-                return r0_low_z * (1 + z) ** exponent_low_z * (h / 0.7**3)
-            else:
-                return r0_high_z * (1 + z) ** exponent_high_z * (h / 0.7**3)
-
-    if sn_type == "cc":
-        return calculate_rcc(z_range, _cosmology.h)
-    elif sn_type == "ia":
-        return calculate_ria(z_range, _cosmology.h)
-    else:
-        raise ValueError(f"sn_type must be cc for core collapse or ia for Type Ia; {sn_type} was provided.")
