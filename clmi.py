@@ -50,7 +50,7 @@ def set_cosmology(new_cosmology):
     _cosmology = new_cosmology
     _LUTM.reset_comoving_volume_dict()
     for instance in ClusterModel.active_instances:
-        instance.set_source_z(instance.source_z)
+        instance.source_z = instance.source_z
 
 
 def set_source_plane_size(new_image_scale_factor):
@@ -236,7 +236,7 @@ class ClusterModel:
         self.y_as_deflect_map = check_and_load_data(y_as_deflect_file)
 
         self.cluster_z = cluster_z
-        self.source_z = source_z
+        self._source_z = source_z
         self.cluster_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.cluster_z)
         self.source_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.source_z)
         self.distance_ratio = lensing_scaling_factor(self.cluster_z, self.source_z)
@@ -253,7 +253,6 @@ class ClusterModel:
         self._critical_area_map = None
         self._caustic_area_map = None               # This map has the same angular scale as lens plane maps.
         self._is_multiply_imaged_map = None         # In the lens plane.
-        # TODO: add checking deflection map units (arcsec, pixel etc) and conversion handling (can you use astropy?)
         if self.wcs is None:
             warnings.warn("The cluster model was unable to load a working World Coordinate System from provided files.")
 
@@ -262,16 +261,15 @@ class ClusterModel:
     def __del__(self):
         self.active_instances.remove(self)
 
-    def set_source_z(self, new_z):
-        """Set the redshift for which parameters will be calculated and reset previously computed z-dependent values.
+    def _get_source_z(self):
+        return self._source_z
 
-        :params:
-            :param float new_z: New redshift for which calculations will be made.
-        """
+    def _set_source_z(self, new_z):      # TODO: Move to property
+        """Set the redshift for which parameters will be calculated and reset previously computed z-dependent values."""
         if new_z < self.cluster_z:
             raise ValueError("Source cannot be placed in front of the cluster! source_z < cluster_z detected: " +
                              str(new_z))
-        self.source_z = new_z
+        self._source_z = new_z
         self.source_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.source_z)
         self.distance_ratio = lensing_scaling_factor(self.cluster_z, new_z)
         self.distance_param = distance_parameter(self.cluster_z, new_z)
@@ -279,6 +277,8 @@ class ClusterModel:
         self._critical_area_map = None
         self._caustic_area_map = None
         self._is_multiply_imaged_map = None   # z-dependent, despite being in the lens plane.
+
+    source_z = property(fget=_get_source_z, fset=_set_source_z, doc="Redshift of the source plane.")
 
     def _generate_arcsec_deflect_maps(self):
         pixel_scale = self.wcs.proj_plane_pixel_scales()[0].to(units.arcsec).value
@@ -290,7 +290,7 @@ class ClusterModel:
         self.x_pixel_deflect_map = self.x_as_deflect_map.copy() / pixel_scale
         self.y_pixel_deflect_map = self.y_as_deflect_map.copy() / pixel_scale
 
-    def get_magnification_map(self):
+    def _get_magnification_map(self):
         """Obtain the magnification map for the model and source redshift.
 
         :returns: Magnification map for the cluster model and source redshift.
@@ -303,6 +303,8 @@ class ClusterModel:
     def _generate_magnification_map(self):
         self._magnification_map = np.nan_to_num(magnification(self.kappa_map, self.gamma_map, self.distance_ratio),
                                                 nan=1.0)
+
+    magnification_map = property(fget=_get_magnification_map)
 
     def point_magnification(self, points, redshifts=None, coord_units=None):
         """
@@ -363,7 +365,7 @@ class ClusterModel:
 
         return magnifications
 
-    def get_critical_area_map(self):
+    def _get_critical_area_map(self):        # TODO: Move to property
         """Obtain a map of the area inside the critical curve in the lens plane.
 
         :returns: Map of the area inside the critical curve, with 1 for inside, 0 for outside.
@@ -374,31 +376,35 @@ class ClusterModel:
         return self._critical_area_map
 
     def _generate_critical_area_map(self):
-        magnif_map = self.get_magnification_map()
+        magnif_map = self._get_magnification_map()
         magnif_sign = np.ones(magnif_map.shape, dtype=int)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map < 0.)] = -1
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
+    critical_area_map = property(fget=_get_critical_area_map)
+
     def get_critical_curve(self):
-        magnif_map = self.get_magnification_map()
+        magnif_map = self._get_magnification_map()
         magnif_sign = np.zeros(magnif_map.shape)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map > 0.)] = 1
         magnif_sign_eroded = cv2.erode(magnif_sign, None, iterations=1)
         magnif_sign_dilated = cv2.dilate(magnif_sign, None, iterations=1)
         return (magnif_sign_dilated - magnif_sign_eroded).astype(int)
 
-    def get_caustic_area_map(self):
+    def _get_caustic_area_map(self):
         """Obtain a map of the area inside the caustic curve in the source plane.
 
         :returns: Map of the area inside the caustic curve, with 1 for inside, 0 for outside.
         :rtype: np.ndarray
         """
         if self._caustic_area_map is None:
-            self._caustic_area_map = self.map_to_source_plane(self.get_critical_area_map())
+            self._caustic_area_map = self.map_to_source_plane(self.critical_area_map)
         return self._caustic_area_map
 
-    def get_is_multiply_imaged_map(self):
+    caustic_area_map = property(fget=_get_caustic_area_map)
+
+    def _get_is_multiply_imaged_map(self):       # TODO: Move to property
         """Obtain a map of the area in the source plane where objects are multiply imaged.
 
             :returns: Map of the multiply imaged area, with 1 for multiply-, 0 for singly-imaged.
@@ -408,19 +414,23 @@ class ClusterModel:
             self._generate_is_multiply_imaged_map()
         return self._is_multiply_imaged_map
 
-    def get_is_singly_imaged_map(self):
+    is_multiply_imaged_map = property(_get_is_multiply_imaged_map)
+
+    def _get_is_singly_imaged_map(self):     # TODO: Move to property
         """Obtain a map of the area in the source plane where objects are singly imaged.
 
                 :returns: Map of the multiply imaged area, with 0 for multiply-, 1 for singly-imaged.
                 :rtype: np.ndarray
         """
-        return np.ones(self._lensing_map_shape, dtype=int) - self.get_is_multiply_imaged_map()
+        return np.ones(self._lensing_map_shape, dtype=int) - self._get_is_multiply_imaged_map()
+
+    is_singly_imaged_map = property(fget=_get_is_singly_imaged_map)
 
     def _generate_is_multiply_imaged_map(self):
         nan_encountered = False
         result_map = np.zeros(self._lensing_map_shape, dtype=int)
-        caustic_area_map = self.get_caustic_area_map()
-        critical_area_map = self.get_critical_area_map()
+        caustic_area_map = self.caustic_area_map
+        critical_area_map = self.critical_area_map
         for y in range(self._lensing_map_shape[0]):
             for x in range(self._lensing_map_shape[1]):
                 if critical_area_map[y, x] == 1:
@@ -483,19 +493,19 @@ class ClusterModel:
         # hit_map = cv2.erode(hit_map, None, iterations=_dilation_erosion_steps)
         return hit_map
 
-    def map_solid_angle(self, pixel_map):
+    def map_solid_angle(self, pixel_map):   # TODO: is this useful?
         """Calculate angular area marked by integer 1s in pixel_map at given redshift, returns an astropy Quantity."""
         pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
         values, counts = np.unique(pixel_map, return_counts=True)
         values_counts = dict(zip(values, counts))
         return pixel_area * values_counts[1]
 
-    def caustic_area_solid_angle(self):
-        return self.map_solid_angle(self.get_caustic_area_map())
+    def caustic_area_solid_angle(self):     # TODO: is this useful?
+        return self.map_solid_angle(self._get_caustic_area_map())
 
-    def solid_angle_from_magnif(self, magnif_map_mask):
+    def solid_angle_from_magnif(self, magnif_map_mask):         # TODO: is this useful?
         pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
-        magnif_map = self.get_magnification_map()
+        magnif_map = self._get_magnification_map()
         area_in_px = 0.
         for y in range(magnif_map.shape[0]):
             for x in range(magnif_map.shape[1]):
@@ -560,13 +570,13 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
     return ClusterModel(**object_input)
 
 
-def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **kwargs):
+def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **kwargs):        # TODO: is this useful?
     """Takes a cluster model and an array of z bins and generates a histogram of delensed comoving volumes in bins."""
     map_is_callable = callable(lens_plane_map)
     result_list = []
     for i in range(len(redshift_bins) - 1):
         mid_z = (redshift_bins[i] + redshift_bins[i+1]) / 2
-        cluster_model.set_source_z(mid_z)
+        cluster_model._set_source_z(mid_z)
         if map_is_callable:
             source_plane_map = cluster_model.map_to_source_plane(lens_plane_map(*args, **kwargs))
         else:
