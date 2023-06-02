@@ -149,7 +149,6 @@ class ClusterModel:
 
     :methods:
         set_source_z: Set a new source redshift for the cluster.
-        get_magnification_map: Get a magnification map for the cluster model.
         point_magnification: Calculate magnification for a set of individual points.
         map_to_source_plane: Map an area from the lens plane to the source plane.
         map_solid_angle: Calculate the solid angle marked by a map.
@@ -182,6 +181,7 @@ class ClusterModel:
 
     :properties:
         source_z (float): Redshift of the source for which most model calculations are made.
+        magnification_map (np.ndarray): Map of magnification of the source plane.
         critical_area_map (np.ndarray): Map of the area inside the critical curve in the lens plane.
         critical_curve (np.ndarray): Map of the critical curve in the source plane.
         caustic_area_map (np.ndarray): Map of the area inside the caustic curve in the source plane.
