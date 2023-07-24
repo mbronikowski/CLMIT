@@ -41,11 +41,7 @@ _LUTM = _LUTManager()
 
 
 def set_cosmology(new_cosmology):
-    """Set astropy cosmology model for calculations in place of the default flat Lambda CDM with H0=70, OmegaM = 0.3.
-
-    Note that this needs to be performed before initiating a ClusterModel instance, otherwise a new working z
-    needs to be set in the instance to reset cosmology-dependent calculations.
-    """
+    """Set astropy cosmology model for calculations in place of the default flat Lambda CDM with H0=70, OmegaM = 0.3."""
     global _cosmology
     _cosmology = new_cosmology
     _LUTM.reset_comoving_volume_dict()
@@ -95,6 +91,12 @@ def magnification(kappa, gamma, scaling_factor):
     return ((1 - kappa * scaling_factor) ** 2 - (gamma * scaling_factor) ** 2) ** -1
 
 
+def total_magnification(magnif_list):
+    """Calculate total magnification from an array of point magnifications, assuming constant surface brightness."""
+    mag_list = np.abs(np.array(magnif_list))
+    return mag_list.size / np.sum(1. / mag_list)
+
+
 def time_delay(z_lens, dist_param, alpha, psi):             # TODO: fix this, what are the units???
     """Calculates the time delay caused by the gravitational potential: Shapiro time delay plus geometric time delay.
 
@@ -109,7 +111,7 @@ def time_delay(z_lens, dist_param, alpha, psi):             # TODO: fix this, wh
 
 
 def _flood_fill(array, start_pixel, targeted_val, new_val):
-    """Flood fill tool on a numpy array using a queue."""
+    """Flood fill tool on a numpy array."""
     if array[start_pixel] != targeted_val:          # Sanity check
         raise ValueError("The flood fill tool has failed. Array had value of " +
                          str(array[start_pixel]) + ", expected " + str(targeted_val) + ".")
@@ -264,10 +266,12 @@ class ClusterModel:
     def __del__(self):
         self.active_instances.remove(self)
 
-    def _get_source_z(self):
+    @property
+    def source_z(self):
         return self._source_z
 
-    def _set_source_z(self, new_z):      # TODO: Move to property
+    @source_z.setter
+    def source_z(self, new_z):
         """Set the redshift for which parameters will be calculated and reset previously computed z-dependent values."""
         if new_z < self.cluster_z:
             raise ValueError("Source cannot be placed in front of the cluster! source_z < cluster_z detected: " +
@@ -281,8 +285,6 @@ class ClusterModel:
         self._caustic_area_map = None
         self._is_multiply_imaged_map = None   # z-dependent, despite being in the lens plane.
 
-    source_z = property(fget=_get_source_z, fset=_set_source_z, doc="Redshift of the source plane.")
-
     def _generate_arcsec_deflect_maps(self):
         pixel_scale = self.wcs.proj_plane_pixel_scales()[0].to(units.arcsec).value
         self.x_as_deflect_map = self.x_pixel_deflect_map.copy() * pixel_scale
@@ -293,7 +295,8 @@ class ClusterModel:
         self.x_pixel_deflect_map = self.x_as_deflect_map.copy() / pixel_scale
         self.y_pixel_deflect_map = self.y_as_deflect_map.copy() / pixel_scale
 
-    def _get_magnification_map(self):
+    @property
+    def magnification_map(self):
         """Obtain the magnification map for the model and source redshift.
 
         :returns: Magnification map for the cluster model and source redshift.
@@ -307,9 +310,7 @@ class ClusterModel:
         self._magnification_map = np.nan_to_num(magnification(self.kappa_map, self.gamma_map, self.distance_ratio),
                                                 nan=1.0)
 
-    magnification_map = property(fget=_get_magnification_map)
-
-    def point_magnification(self, points, redshifts=None, coord_units=None):
+    def point_magnification(self, points, redshifts=None, coord_units=None, box_size=None):
         """
         Extracts magnification for a given point or set of points.
 
@@ -322,6 +323,9 @@ class ClusterModel:
         :param coord_units: If points is of str type, this will be passed to an astropy.coordinates.SkyCoord object
                             for coordinate calculations.
         :type coord_units: astropy.units.Unit or str or tuple of astropy.units.Unit or str or None
+        :param box_size: Size of the box for which magnification should be estimated. If provided, instead of point
+                          magnification, total magnification of a box will be provided.
+                          If not Quantity, arcsec are assumed.
         :returns: Magnification values for every point in the provided data.
         :rtype: float or np.ndarray
         """
@@ -330,6 +334,13 @@ class ClusterModel:
                 return SkyCoord(string, unit=coord_units)
             else:
                 return SkyCoord(string)
+
+        box_pixel_halfside = 0
+        if box_size is not None:
+            if not isinstance(box_size, units.Quantity):
+                box_size = box_size * units.arcsec
+            box_pixel_halfside = box_size.to(units.arcsec) / self.wcs.proj_plane_pixel_scales()[0].to(units.arcsec)
+            box_pixel_halfside = int(box_pixel_halfside.value / 2)        # Half of distance from middle of box to edge
 
         # Handle one point:
 
@@ -341,11 +352,16 @@ class ClusterModel:
                 scaling_factor = lensing_scaling_factor(self.cluster_z, redshifts)
             else:
                 scaling_factor = self.distance_ratio
+
             x_coord, y_coord = self.wcs.world_to_pixel(points)
             x_coord, y_coord = round(float(x_coord)), round(float(y_coord))       # Cast to int
-            kappa, gamma = self.kappa_map[y_coord, x_coord], self.gamma_map[y_coord, x_coord]
-            magnifications = magnification(kappa, gamma, scaling_factor)
-            return magnifications
+            kappa, gamma = self.kappa_map[y_coord - box_pixel_halfside:y_coord + box_pixel_halfside + 1,
+                                          x_coord - box_pixel_halfside:x_coord + box_pixel_halfside + 1], \
+                           self.gamma_map[y_coord - box_pixel_halfside:y_coord + box_pixel_halfside + 1,
+                                          x_coord - box_pixel_halfside:x_coord + box_pixel_halfside + 1]
+            magnifs = magnification(kappa, gamma, scaling_factor)
+
+            return total_magnification(magnifs)
 
         # Now handle iterable inputs:
         if isinstance(redshifts, float):
@@ -357,18 +373,24 @@ class ClusterModel:
                     point = SkyCoord(point, unit=coord_units)
                 else:
                     point = SkyCoord(point)
-            x_coord, y_coord = self.wcs.world_to_pixel(point)
-            x_coord, y_coord = round(float(x_coord)), round(float(y_coord))       # Cast to int
-            kappa, gamma = self.kappa_map[y_coord, x_coord], self.gamma_map[y_coord, x_coord]
             if redshifts is None:
                 scaling_factor = self.distance_ratio
             else:
                 scaling_factor = lensing_scaling_factor(self.cluster_z, redshifts[i])
-            magnifications[i] = magnification(kappa, gamma, scaling_factor)
+
+            x_coord, y_coord = self.wcs.world_to_pixel(point)
+            x_coord, y_coord = round(float(x_coord)), round(float(y_coord))       # Cast to int
+            kappa, gamma = self.kappa_map[y_coord - box_pixel_halfside:y_coord + box_pixel_halfside,
+                                          x_coord - box_pixel_halfside:x_coord + box_pixel_halfside + 1], \
+                           self.gamma_map[y_coord - box_pixel_halfside:y_coord + box_pixel_halfside,
+                                          x_coord - box_pixel_halfside:x_coord + box_pixel_halfside + 1]
+            magnifs = magnification(kappa, gamma, scaling_factor)
+            magnifications[i] = total_magnification(magnifs)
 
         return magnifications
 
-    def _get_critical_area_map(self):        # TODO: Move to property
+    @property
+    def critical_area_map(self):        # TODO: Move to property
         """Obtain a map of the area inside the critical curve in the lens plane.
 
         :returns: Map of the area inside the critical curve, with 1 for inside, 0 for outside.
@@ -379,25 +401,23 @@ class ClusterModel:
         return self._critical_area_map
 
     def _generate_critical_area_map(self):
-        magnif_map = self._get_magnification_map()
+        magnif_map = self.magnification_map
         magnif_sign = np.ones(magnif_map.shape, dtype=int)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map < 0.)] = -1
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
-    critical_area_map = property(fget=_get_critical_area_map)
-
-    def _get_critical_curve(self):
-        magnif_map = self._get_magnification_map()
+    @property
+    def critical_curve(self):
+        magnif_map = self.magnification_map
         magnif_sign = np.zeros(magnif_map.shape)      # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map > 0.)] = 1
         magnif_sign_eroded = cv2.erode(magnif_sign, None, iterations=1)
         magnif_sign_dilated = cv2.dilate(magnif_sign, None, iterations=1)
         return (magnif_sign_dilated - magnif_sign_eroded).astype(int)
 
-    critical_curve = property(fget=_get_critical_curve)
-
-    def _get_caustic_area_map(self):
+    @property
+    def caustic_area_map(self):
         """Obtain a map of the area inside the caustic curve in the source plane.
 
         :returns: Map of the area inside the caustic curve, with 1 for inside, 0 for outside.
@@ -407,9 +427,8 @@ class ClusterModel:
             self._caustic_area_map = self.map_to_source_plane(self.critical_area_map)
         return self._caustic_area_map
 
-    caustic_area_map = property(fget=_get_caustic_area_map)
-
-    def _get_is_multiply_imaged_map(self):       # TODO: Move to property
+    @property
+    def is_multiply_imaged_map(self):       # TODO: Move to property
         """Obtain a map of the area in the source plane where objects are multiply imaged.
 
             :returns: Map of the multiply imaged area, with 1 for multiply-, 0 for singly-imaged.
@@ -419,17 +438,14 @@ class ClusterModel:
             self._generate_is_multiply_imaged_map()
         return self._is_multiply_imaged_map
 
-    is_multiply_imaged_map = property(_get_is_multiply_imaged_map)
-
-    def _get_is_singly_imaged_map(self):     # TODO: Move to property
+    @property
+    def is_singly_imaged_map(self):        # TODO: move to decorator format
         """Obtain a map of the area in the source plane where objects are singly imaged.
 
                 :returns: Map of the multiply imaged area, with 0 for multiply-, 1 for singly-imaged.
                 :rtype: np.ndarray
         """
-        return np.ones(self._lensing_map_shape, dtype=int) - self._get_is_multiply_imaged_map()
-
-    is_singly_imaged_map = property(fget=_get_is_singly_imaged_map)
+        return np.ones(self._lensing_map_shape, dtype=int) - self.is_multiply_imaged_map
 
     def _generate_is_multiply_imaged_map(self):
         nan_encountered = False
@@ -506,11 +522,11 @@ class ClusterModel:
         return pixel_area * values_counts[1]
 
     def caustic_area_solid_angle(self):     # TODO: is this useful?
-        return self.map_solid_angle(self._get_caustic_area_map())
+        return self.map_solid_angle(self.caustic_area_map)
 
     def solid_angle_from_magnif(self, magnif_map_mask):         # TODO: is this useful?
         pixel_area = self.wcs.proj_plane_pixel_area().to(units.rad ** 2)
-        magnif_map = self._get_magnification_map()
+        magnif_map = self.magnification_map
         area_in_px = 0.
         for y in range(magnif_map.shape[0]):
             for x in range(magnif_map.shape[1]):
