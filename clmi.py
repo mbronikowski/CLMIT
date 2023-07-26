@@ -407,6 +407,24 @@ class ClusterModel:
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
+    def _source_plane_indices(self):
+        """Calculates an array of indices, which show how pixels are mapped from lens plane to source plane.
+
+        The arrays are 2 x dimension of source plane maps. The 1st array contains indices, the 2nd contains
+        a mask of which indices are valid. It's less than ideal clarity-wise.
+        """
+        coords_mapped = np.indices(self.y_pixel_deflect_map.shape)
+        coords_mapped[0] += self._source_plane_map_offset[0] \
+                            - (self.distance_ratio * self.y_pixel_deflect_map).astype(int)
+        coords_mapped[1] += self._source_plane_map_offset[1] \
+                            - (self.distance_ratio * self.x_pixel_deflect_map).astype(int)
+        np.nan_to_num(coords_mapped, copy=False, nan=-1)
+        valid_px_mask = (0 <= coords_mapped[0]) \
+                        & (coords_mapped[0] < self._source_plane_map_shape[0]) \
+                        & (0 <= coords_mapped[1]) \
+                        & (coords_mapped[1] < self._source_plane_map_shape[1])
+        return coords_mapped, valid_px_mask
+
     @property
     def critical_curve(self):
         magnif_map = self.magnification_map
@@ -428,7 +446,7 @@ class ClusterModel:
         return self._caustic_area_map
 
     @property
-    def is_multiply_imaged_map(self):       # TODO: Move to property
+    def is_multiply_imaged_map(self):
         """Obtain a map of the area in the source plane where objects are multiply imaged.
 
             :returns: Map of the multiply imaged area, with 1 for multiply-, 0 for singly-imaged.
@@ -439,38 +457,18 @@ class ClusterModel:
         return self._is_multiply_imaged_map
 
     @property
-    def is_singly_imaged_map(self):        # TODO: move to decorator format
+    def is_singly_imaged_map(self):
         """Obtain a map of the area in the source plane where objects are singly imaged.
 
                 :returns: Map of the multiply imaged area, with 0 for multiply-, 1 for singly-imaged.
                 :rtype: np.ndarray
         """
-        return np.ones(self._lensing_map_shape, dtype=int) - self.is_multiply_imaged_map
+        return np.ones(self.is_multiply_imaged_map.shape, dtype=int) - self.is_multiply_imaged_map
 
     def _generate_is_multiply_imaged_map(self):
-        nan_encountered = False
-        result_map = np.zeros(self._lensing_map_shape, dtype=int)
-        caustic_area_map = self.caustic_area_map
-        critical_area_map = self.critical_area_map
-        for y in range(self._lensing_map_shape[0]):
-            for x in range(self._lensing_map_shape[1]):
-                if critical_area_map[y, x] == 1:
-                    result_map[y, x] = 1
-                elif math.isnan(self.y_pixel_deflect_map[y, x]) or math.isnan(self.x_pixel_deflect_map[y, x]):
-                    if not nan_encountered:
-                        nan_encountered = True
-                        warnings.warn("NaN encountered in deflection maps.")
-                else:
-                    y_mapped = int(y
-                                   - self.y_pixel_deflect_map[y, x] * self.distance_ratio
-                                   + self._source_plane_map_offset[0])
-                    x_mapped = int(x
-                                   - self.x_pixel_deflect_map[y, x] * self.distance_ratio
-                                   + self._source_plane_map_offset[1])
-                    if 0 <= y_mapped < caustic_area_map.shape[0] and 0 <= x_mapped < caustic_area_map.shape[1]:
-                        if caustic_area_map[y_mapped, x_mapped] == 1:
-                            result_map[y, x] = 1
-        self._is_multiply_imaged_map = result_map
+        coords_mapped, valid_px_mask = self._source_plane_indices()
+        self._is_multiply_imaged_map = np.where((self.caustic_area_map[coords_mapped[0], coords_mapped[1]] == 1)
+                                                & valid_px_mask, 1, 0)
 
     def map_to_source_plane(self, lens_plane_map):
         """Map arbitrary area from the lens plane to the source plane.
@@ -488,30 +486,14 @@ class ClusterModel:
         if lens_plane_map.shape != self._lensing_map_shape:
             raise ValueError("The array to be mapped back to the source plane needs to have the same shape \
                 as deflection maps.")
+
+        coords_mapped, valid_px_mask = self._source_plane_indices()
+        valid_px_mask = np.where(lens_plane_map == 1, valid_px_mask, False)
+
         hit_map = np.zeros(self._source_plane_map_shape, dtype=int)
-        offset = self._source_plane_map_offset
-        mapping_warning_issued = False
-        nan_encountered = False
-        for y in range(lens_plane_map.shape[0]):
-            for x in range(lens_plane_map.shape[1]):
-                if lens_plane_map[y, x] > 0:        # "If the pixel in the lens plane is meant to be mapped"
-                    if math.isnan(self.y_pixel_deflect_map[y, x]) or math.isnan(self.x_pixel_deflect_map[y, x]):
-                        if not nan_encountered:
-                            nan_encountered = True
-                            warnings.warn("NaN encountered in deflection maps.")
-                    else:
-                        y_hit = int(y - self.y_pixel_deflect_map[y, x] * self.distance_ratio + offset[0])
-                        x_hit = int(x - self.x_pixel_deflect_map[y, x] * self.distance_ratio + offset[1])
-                        if 0 <= y_hit < hit_map.shape[0] and 0 <= x_hit < hit_map.shape[1]:
-                            hit_map[y_hit, x_hit] = 1
-                        elif not mapping_warning_issued:
-                            warnings.warn("Some of the area passed to this function is mapped outside the generated " +
-                                          "source plane map. This WILL affect area calculations.")
-                            mapping_warning_issued = True
-        # Now we have a raw map, e.g. from the critical to caustic curve.
-        # If for some reason the map isn't solid, i.e. there are empty spots between mapped pixels:
-        # hit_map = cv2.dilate(hit_map, None, iterations=_dilation_erosion_steps)   # This requires hit_map to be float
-        # hit_map = cv2.erode(hit_map, None, iterations=_dilation_erosion_steps)
+        coords_mapped = coords_mapped[0][valid_px_mask], coords_mapped[1][valid_px_mask]
+        hit_map[coords_mapped] = 1
+
         return hit_map
 
     def map_solid_angle(self, pixel_map):   # TODO: is this useful?
