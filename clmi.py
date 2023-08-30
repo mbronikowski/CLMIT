@@ -15,6 +15,7 @@ from scipy.ndimage.measurements import label
 _cosmology = FlatLambdaCDM(H0=70, Om0=0.3)      # Default cosmology assumptions. Change with set_cosmology()
 _dilation_erosion_steps = 1
 _source_plane_map_rel_size = 1
+_multip_map_kernel_size = 7
 
 
 class _LUTManager:
@@ -390,7 +391,7 @@ class ClusterModel:
         return magnifications
 
     @property
-    def critical_area_map(self):        # TODO: Move to property
+    def critical_area_map(self):
         """Obtain a map of the area inside the critical curve in the lens plane.
 
         :returns: Map of the area inside the critical curve, with 1 for inside, 0 for outside.
@@ -402,17 +403,20 @@ class ClusterModel:
 
     def _generate_critical_area_map(self):
         magnif_map = self.magnification_map
-        magnif_sign = np.ones(magnif_map.shape, dtype=int)      # Get map of magnification signs, get rid of outer area.
+        magnif_sign = np.ones(magnif_map.shape, dtype="uint8")  # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map < 0.)] = -1
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
 
-    def _source_plane_indices(self):
+    @property
+    def source_plane_mapping_map(self):
         """Calculates an array of indices, which show how pixels are mapped from lens plane to source plane.
 
         The arrays are 2 x dimension of source plane maps. The 1st array contains indices, the 2nd contains
         a mask of which indices are valid. It's less than ideal clarity-wise.
         """
+        if self.x_pixel_deflect_map is None or self.y_pixel_deflect_map is None:
+            self._generate_pixel_deflect_maps()
         coords_mapped = np.indices(self.y_pixel_deflect_map.shape)
         coords_mapped[0] += self._source_plane_map_offset[0] \
                             - (self.distance_ratio * self.y_pixel_deflect_map).astype(int)
@@ -443,7 +447,22 @@ class ClusterModel:
         """
         if self._caustic_area_map is None:
             self._caustic_area_map = self.map_to_source_plane(self.critical_area_map)
+            self._caustic_area_map = cv2.erode(cv2.dilate(      # Gets rid of numerical issues
+                self._caustic_area_map,
+                None, iterations=_dilation_erosion_steps), None, iterations=_dilation_erosion_steps)
         return self._caustic_area_map
+
+    def image_multiplicity_map(self, minimum_magnif=0):
+        source_map = np.zeros(self._source_plane_map_shape)
+        magnif_map = np.abs(self.magnification_map)
+        coords_mapped, valid_px_mask = self.source_plane_mapping_map
+        valid_px_mask = np.where(magnif_map > minimum_magnif, valid_px_mask, False)
+        magnif_map = np.where(valid_px_mask, 1 / magnif_map, 0)     # Now this stores 1/mu for every valid pixel.
+        np.add.at(source_map, (coords_mapped[0], coords_mapped[1]), magnif_map)
+        return cv2.medianBlur(np.array(np.rint(source_map), dtype="uint8"), _multip_map_kernel_size)
+        # For some reason, np.rint(source_map, dtype='uint8') throws errors in Jupyter.
+
+    # TODO: The following two functions seem completely redundant
 
     @property
     def is_multiply_imaged_map(self):
@@ -466,7 +485,7 @@ class ClusterModel:
         return np.ones(self.is_multiply_imaged_map.shape, dtype=int) - self.is_multiply_imaged_map
 
     def _generate_is_multiply_imaged_map(self):
-        coords_mapped, valid_px_mask = self._source_plane_indices()
+        coords_mapped, valid_px_mask = self.source_plane_mapping_map
         self._is_multiply_imaged_map = np.where((self.caustic_area_map[coords_mapped[0], coords_mapped[1]] == 1)
                                                 & valid_px_mask, 1, 0)
 
@@ -481,16 +500,14 @@ class ClusterModel:
         The function will fill in any holes in the mapped source plane area; the function does not handle areas with
         holes in them in the source plane. This aids with numerical issues inside the caustic curve.
         """
-        if self.x_pixel_deflect_map is None or self.y_pixel_deflect_map is None:
-            self._generate_pixel_deflect_maps()
         if lens_plane_map.shape != self._lensing_map_shape:
             raise ValueError("The array to be mapped back to the source plane needs to have the same shape \
                 as deflection maps.")
 
-        coords_mapped, valid_px_mask = self._source_plane_indices()
+        coords_mapped, valid_px_mask = self.source_plane_mapping_map
         valid_px_mask = np.where(lens_plane_map == 1, valid_px_mask, False)
 
-        hit_map = np.zeros(self._source_plane_map_shape, dtype=int)
+        hit_map = np.zeros(self._source_plane_map_shape, dtype="uint8")
         coords_mapped = coords_mapped[0][valid_px_mask], coords_mapped[1][valid_px_mask]
         hit_map[coords_mapped] = 1
 
