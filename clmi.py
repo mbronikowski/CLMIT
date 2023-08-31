@@ -458,6 +458,8 @@ class ClusterModel:
         coords_mapped, valid_px_mask = self.source_plane_mapping_map
         valid_px_mask = np.where(magnif_map > minimum_magnif, valid_px_mask, False)
         magnif_map = np.where(valid_px_mask, 1 / magnif_map, 0)     # Now this stores 1/mu for every valid pixel.
+        coords_mapped[0] = np.where(valid_px_mask, coords_mapped[0], 0)     # Pointing out-of-bounds pixels to
+        coords_mapped[1] = np.where(valid_px_mask, coords_mapped[1], 0)     # a harmless [0, 0]
         np.add.at(source_map, (coords_mapped[0], coords_mapped[1]), magnif_map)
         return cv2.medianBlur(np.array(np.rint(source_map), dtype="uint8"), _multip_map_kernel_size)
         # For some reason, np.rint(source_map, dtype='uint8') throws errors in Jupyter.
