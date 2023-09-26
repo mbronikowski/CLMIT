@@ -544,8 +544,7 @@ _psi_regex = re.compile(r'(psi|poten)[^12]*fits$')
 def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate, but it works.
     """Attempt to load data into a ClusterModel object from a folder, assuming typical filenames were used."""
     # This is disgusting boilerplate, but I guess it works.
-    def append_path(file_name):
-        return path + '/' + file_name
+
     object_input = {
         "cluster_z": cluster_z,
         "source_z": source_z,
@@ -565,30 +564,30 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
             continue
         if gamma_match is not None:
             assert object_input["gamma_file"] is None, "Multiple files match attempted pattern for gamma/shear file."
-            object_input["gamma_file"] = append_path(filename)
+            object_input["gamma_file"] = os.path.join(path, filename)
         if kappa_match is not None:
             assert object_input["kappa_file"] is None, \
                 "Multiple files match attempted pattern for kappa/convergence file."
-            object_input["kappa_file"] = append_path(filename)
+            object_input["kappa_file"] = os.path.join(path, filename)
         if psi_match is not None:
             assert object_input["psi_file"] is None, "Multiple files match attempted pattern for psi/potential file."
-            object_input["psi_file"] = append_path(filename)
+            object_input["psi_file"] = os.path.join(path, filename)
         if "x-arcsec-deflect.fits" in filename or "dx.fits" in filename or "deflect_arcsec_x.fits" in filename:
             assert object_input["x_as_deflect_file"] is None, \
                 "Multiple files match attempted pattern for x [arcsec] deflect file."
-            object_input["x_as_deflect_file"] = append_path(filename)
+            object_input["x_as_deflect_file"] = os.path.join(path, filename)
         if "y-arcsec-deflect.fits" in filename or "dy.fits" in filename or "deflect_arcsec_y.fits" in filename:
             assert object_input["y_as_deflect_file"] is None, \
                 "Multiple files match attempted pattern for y [arcsec] deflect file."
-            object_input["y_as_deflect_file"] = append_path(filename)
+            object_input["y_as_deflect_file"] = os.path.join(path, filename)
         if "x-pixels-deflect.fits" in filename:
             assert object_input["x_pixel_deflect_file"] is None, \
                 "Multiple files match attempted pattern for x [px] deflect file."
-            object_input["x_pixel_deflect_file"] = append_path(filename)
+            object_input["x_pixel_deflect_file"] = os.path.join(path, filename)
         if "y-pixels-deflect.fits" in filename:
             assert object_input["y_pixel_deflect_file"] is None, \
                 "Multiple files match attempted pattern for y [px] deflect file."
-            object_input["y_pixel_deflect_file"] = append_path(filename)
+            object_input["y_pixel_deflect_file"] = os.path.join(path, filename)
     return ClusterModel(**object_input)
 
 
