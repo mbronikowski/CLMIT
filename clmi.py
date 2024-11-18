@@ -68,18 +68,6 @@ def lensing_scaling_factor(z_lens, z_source):
     return (dist_deflector_source / dist_source).value     # Otherwise an astropy Quantity unitless object is generated.
 
 
-def distance_parameter(z_lens, z_source):       # TODO: rename?
-    """Used in time delay equation, see https://arxiv.org/pdf/astro-ph/9606001.pdf Eq. 63.
-
-    Uses module level defined cosmology, which can be redefined using set_cosmology.
-    """
-
-    dist_deflector_source = _cosmology.angular_diameter_distance_z1z2(z_lens, z_source)
-    dist_source = _cosmology.angular_diameter_distance_z1z2(0, z_source)
-    dist_deflector = _cosmology.angular_diameter_distance_z1z2(0, z_lens)
-    return dist_deflector * dist_source / dist_deflector_source
-
-
 def magnification(kappa, gamma, scaling_factor):
     """Basic lensing formula for magnification based on convergence (kappa) and shear (gamma) for given Dds/Ds.
 
@@ -98,17 +86,21 @@ def total_magnification(magnif_list):
     return mag_list.size / np.sum(1. / mag_list)
 
 
-def time_delay(z_lens, dist_param, alpha, psi):             # TODO: fix this, what are the units???
+def time_delay(z_lens, z_source, defl_x, defl_y, psi, result_units=units.s):
     """Calculates the time delay caused by the gravitational potential: Shapiro time delay plus geometric time delay.
 
-    Results are in [unknown units], as long as angles are in [unknown units].
-    dist_param is D_lens * D_source / D_(lens to source), NOT Dds_Ds
     alpha: Deflection angle, equal to theta - beta
     psi: Gravitational lensing potential
+
     Citation: https://arxiv.org/pdf/astro-ph/9606001.pdf equation 63
     """
 
-    return (1 + z_lens) / constants.c * dist_param * (.5 * (alpha ** 2) - psi)
+    dist_deflector_source = _cosmology.angular_diameter_distance_z1z2(z_lens, z_source)
+    dist_source = _cosmology.angular_diameter_distance_z1z2(0, z_source)
+    dist_deflector = _cosmology.angular_diameter_distance_z1z2(0, z_lens)
+    dist_param = dist_deflector * dist_source / dist_deflector_source
+
+    return ((1 + z_lens) / constants.c * dist_param).to(result_units) * (.5 * (defl_x ** 2 + defl_y ** 2) - psi)
 
 
 def _flood_fill(array, start_pixel, targeted_val, new_val):
@@ -246,7 +238,7 @@ class ClusterModel:
         self.cluster_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.cluster_z)
         self.source_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.source_z)
         self.distance_ratio = lensing_scaling_factor(self.cluster_z, self.source_z)
-        self.distance_param = distance_parameter(self.cluster_z, self.source_z)
+        # self.distance_param = distance_parameter(self.cluster_z, self.source_z)
 
         if self._lensing_map_shape is not None:
             self._source_plane_rel_size = _source_plane_map_rel_size
@@ -280,7 +272,7 @@ class ClusterModel:
         self._source_z = new_z
         self.source_angular_diameter_distance = _cosmology.angular_diameter_distance_z1z2(0, self.source_z)
         self.distance_ratio = lensing_scaling_factor(self.cluster_z, new_z)
-        self.distance_param = distance_parameter(self.cluster_z, new_z)
+        # self.distance_param = distance_parameter(self.cluster_z, new_z)
         self._magnification_map = None        # Reset all z-specific data. It will be generated as needed.
         self._critical_area_map = None
         self._caustic_area_map = None
@@ -318,7 +310,7 @@ class ClusterModel:
         :param points: Set of points for which magnifications are to be computed.
                        Can be a string, astropy.coordinates.SkyCoord object, or iterable thereof.
         :type points: str or astropy.coordinates.SkyCoord or iterable
-        :param redshifts: Set of corresponding redshifts for which magnifications are to be computed.
+        :param redshifts: Array-like of corresponding redshifts for which magnifications are to be computed.
                           If none are provided, all magnifications will be computed for the instance's source_z.
         :type redshifts: float or iterable of floats or None
         :param coord_units: If points is of str type, this will be passed to an astropy.coordinates.SkyCoord object
@@ -403,7 +395,7 @@ class ClusterModel:
 
     def _generate_critical_area_map(self):
         magnif_map = self.magnification_map
-        magnif_sign = np.ones(magnif_map.shape, dtype="uint8")  # Get map of magnification signs, get rid of outer area.
+        magnif_sign = np.ones(magnif_map.shape, dtype=int)  # Get map of magnification signs, get rid of outer area.
         magnif_sign[np.where(magnif_map < 0.)] = -1
         magnif_sign = _flood_fill(magnif_sign, (0, 0), 1, 0)         # Note: we're assuming (0, 0) is outside
         self._critical_area_map = np.abs(magnif_sign)                # the critical curve. If it isn't, this will crash.
@@ -452,7 +444,7 @@ class ClusterModel:
                 None, iterations=_dilation_erosion_steps), None, iterations=_dilation_erosion_steps)
         return self._caustic_area_map
 
-    def image_multiplicity_map(self, minimum_magnif=0):
+    def image_multiplicity_map(self, minimum_magnif=-0.1):
         source_map = np.zeros(self._source_plane_map_shape)
         magnif_map = np.abs(self.magnification_map)
         coords_mapped, valid_px_mask = self.source_plane_mapping_map
@@ -461,8 +453,9 @@ class ClusterModel:
         coords_mapped[0] = np.where(valid_px_mask, coords_mapped[0], 0)     # Pointing out-of-bounds pixels to
         coords_mapped[1] = np.where(valid_px_mask, coords_mapped[1], 0)     # a harmless [0, 0]
         np.add.at(source_map, (coords_mapped[0], coords_mapped[1]), magnif_map)
-        return cv2.medianBlur(np.array(np.rint(source_map), dtype="uint8"), _multip_map_kernel_size)
-        # For some reason, np.rint(source_map, dtype='uint8') throws errors in Jupyter.
+        #return np.array(np.rint(source_map))
+        return cv2.medianBlur(np.array(np.rint(source_map), dtype=int), _multip_map_kernel_size)
+        # For some reason, np.rint(source_map, dtype=int) throws errors in Jupyter.
 
     # TODO: The following two functions seem completely redundant
 
@@ -507,9 +500,9 @@ class ClusterModel:
                 as deflection maps.")
 
         coords_mapped, valid_px_mask = self.source_plane_mapping_map
-        valid_px_mask = np.where(lens_plane_map == 1, valid_px_mask, False)
+        valid_px_mask = np.where(lens_plane_map >= 1, valid_px_mask, False)
 
-        hit_map = np.zeros(self._source_plane_map_shape, dtype="uint8")
+        hit_map = np.zeros(self._source_plane_map_shape, dtype=int)
         coords_mapped = coords_mapped[0][valid_px_mask], coords_mapped[1][valid_px_mask]
         hit_map[coords_mapped] = 1
 
@@ -541,10 +534,10 @@ _kappa_regex = re.compile(r'(kappa|convergence)[^12]*$')
 _psi_regex = re.compile(r'(psi|poten)[^12]*fits$')
 
 
-def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate, but it works.
+def load_to_model(path, cluster_z, source_z=9.):
     """Attempt to load data into a ClusterModel object from a folder, assuming typical filenames were used."""
-    # This is disgusting boilerplate, but I guess it works.
 
+    # This is disgusting boilerplate, but I guess it works.
     object_input = {
         "cluster_z": cluster_z,
         "source_z": source_z,
@@ -563,47 +556,38 @@ def load_to_model(path, cluster_z, source_z=9.):        # Disgusting boilerplate
         if ".fits" not in filename:
             continue
         if gamma_match is not None:
-            assert object_input["gamma_file"] is None, "Multiple files match attempted pattern for gamma/shear file."
+            assert object_input["gamma_file"] is None, \
+                f"Multiple files match attempted pattern for gamma/shear file: {object_input['gamma_file']}, {filename}"
             object_input["gamma_file"] = os.path.join(path, filename)
         if kappa_match is not None:
             assert object_input["kappa_file"] is None, \
-                "Multiple files match attempted pattern for kappa/convergence file."
+                f"Multiple files match attempted pattern for kappa/convergence file: \
+                {object_input['kappa_file']}, {filename}"
             object_input["kappa_file"] = os.path.join(path, filename)
         if psi_match is not None:
-            assert object_input["psi_file"] is None, "Multiple files match attempted pattern for psi/potential file."
+            assert object_input["psi_file"] is None, \
+                f"Multiple files match attempted pattern for psi/potential file: \
+                {object_input['psi_file']}, {filename}"
             object_input["psi_file"] = os.path.join(path, filename)
         if "x-arcsec-deflect.fits" in filename or "dx.fits" in filename or "deflect_arcsec_x.fits" in filename:
             assert object_input["x_as_deflect_file"] is None, \
-                "Multiple files match attempted pattern for x [arcsec] deflect file."
+                f"Multiple files match attempted pattern for x [arcsec] deflect file: \
+                {object_input['x_as_deflect_file']}, {filename}"
             object_input["x_as_deflect_file"] = os.path.join(path, filename)
         if "y-arcsec-deflect.fits" in filename or "dy.fits" in filename or "deflect_arcsec_y.fits" in filename:
             assert object_input["y_as_deflect_file"] is None, \
-                "Multiple files match attempted pattern for y [arcsec] deflect file."
+                f"Multiple files match attempted pattern for y [arcsec] deflect file: \
+                {object_input['y_as_deflect_file']}, {filename}"
             object_input["y_as_deflect_file"] = os.path.join(path, filename)
         if "x-pixels-deflect.fits" in filename:
             assert object_input["x_pixel_deflect_file"] is None, \
-                "Multiple files match attempted pattern for x [px] deflect file."
+                f"Multiple files match attempted pattern for x [px] deflect file: \
+                {object_input['x_pixel_deflect_file']}, {filename}"
             object_input["x_pixel_deflect_file"] = os.path.join(path, filename)
         if "y-pixels-deflect.fits" in filename:
             assert object_input["y_pixel_deflect_file"] is None, \
-                "Multiple files match attempted pattern for y [px] deflect file."
+                f"Multiple files match attempted pattern for y [px] deflect file: \
+                {object_input['y_pixel_deflect_file']}, {filename}"
             object_input["y_pixel_deflect_file"] = os.path.join(path, filename)
     return ClusterModel(**object_input)
 
-
-def redshift_volume_bins(cluster_model, lens_plane_map, redshift_bins, *args, **kwargs):        # TODO: is this useful?
-    """Takes a cluster model and an array of z bins and generates a histogram of delensed comoving volumes in bins."""
-    map_is_callable = callable(lens_plane_map)
-    result_list = []
-    for i in range(len(redshift_bins) - 1):
-        mid_z = (redshift_bins[i] + redshift_bins[i+1]) / 2
-        cluster_model.source_z = mid_z
-        if map_is_callable:
-            source_plane_map = cluster_model.map_to_source_plane(lens_plane_map(*args, **kwargs))
-        else:
-            source_plane_map = cluster_model.map_to_source_plane(lens_plane_map)
-        vol_in_bin = (cluster_model.map_solid_angle(source_plane_map)
-                      / (4 * math.pi * units.rad ** 2)
-                      * (_LUTM.get_comoving_volume(redshift_bins[i+1]) - _LUTM.get_comoving_volume(redshift_bins[i])))
-        result_list.append(vol_in_bin)
-    return units.Quantity(result_list, units.Mpc ** 3)      # Converting list of Quantity objects to one Quantity.
