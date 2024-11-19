@@ -440,7 +440,7 @@ class ClusterModel:
         if self._caustic_area_map is None:
             self._caustic_area_map = self.map_to_source_plane(self.critical_area_map)
             self._caustic_area_map = cv2.erode(cv2.dilate(      # Gets rid of numerical issues
-                self._caustic_area_map,
+                self._caustic_area_map.astype("uint8"),
                 None, iterations=_dilation_erosion_steps), None, iterations=_dilation_erosion_steps)
         return self._caustic_area_map
 
@@ -454,7 +454,7 @@ class ClusterModel:
         coords_mapped[1] = np.where(valid_px_mask, coords_mapped[1], 0)     # a harmless [0, 0]
         np.add.at(source_map, (coords_mapped[0], coords_mapped[1]), magnif_map)
         #return np.array(np.rint(source_map))
-        return cv2.medianBlur(np.array(np.rint(source_map), dtype=int), _multip_map_kernel_size)
+        return cv2.medianBlur(np.array(np.rint(source_map), dtype="uint8"), _multip_map_kernel_size)
         # For some reason, np.rint(source_map, dtype=int) throws errors in Jupyter.
 
     # TODO: The following two functions seem completely redundant
